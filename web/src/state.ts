@@ -11,9 +11,10 @@ import { batch, computed, signal } from '@preact/signals';
 import type { PtydStatus, SessionMeta } from '../../src/shared/protocol.ts';
 import type { DeviceClass, Prefs } from '../../src/shared/prefs.ts';
 import { defaultPrefs, deviceClassFor } from '../../src/shared/prefs.ts';
-import type { Keymap } from '../../src/shared/keymap.ts';
-import { defaultKeymap } from '../../src/shared/keymap.ts';
+import type { SharedKeymap } from '../../src/shared/keymap.ts';
+import { defaultSharedKeymap, mergeKeymap } from '../../src/shared/keymap.ts';
 import { api, ApiError, type AuthStatus, type Health } from './api.ts';
+import { localShortcuts, setLocalShortcuts } from './local-shortcuts.ts';
 import {
   closePane,
   deserializeLayout,
@@ -43,7 +44,20 @@ export const eventsConnected = signal(false);
 export const health = signal<Health | null>(null);
 export const authStatus = signal<AuthStatus | null>(null);
 export const prefs = signal<Prefs>(defaultPrefs);
-export const keymap = signal<Keymap>(defaultKeymap);
+
+/** What each key does — synced across devices, fetched from `/api/keymap`. */
+export const sharedKeymap = signal<SharedKeymap>(defaultSharedKeymap);
+
+/**
+ * The full keymap `keys.ts` and the UI read from: the synced bindings plus
+ * this device's own on/off switches (`local-shortcuts.ts`), merged. Read-only
+ * — write to `sharedKeymap`/`saveSharedKeymap` or `setLocalShortcuts`
+ * depending on which half actually changed.
+ */
+export const keymap = computed(() => mergeKeymap(sharedKeymap.value, localShortcuts.value));
+
+export { localShortcuts, setLocalShortcuts };
+
 /** True while the leader key is armed and waiting for the next keystroke. */
 export const leaderArmed = signal(false);
 
@@ -204,13 +218,43 @@ export function upsertSession(session: SessionMeta): void {
   );
 }
 
+/**
+ * Session ids in most-recently-focused order, most recent first.
+ *
+ * This is what decides which terminal reappears when the one a pane was
+ * showing closes: the tab you looked at just before this one, not whichever
+ * happens to be oldest by creation time. Purely local UI memory, not synced
+ * or persisted — it only needs to survive for the length of this tab's life.
+ */
+const mruSessionIds: string[] = [];
+
+function touchMru(id: string): void {
+  const at = mruSessionIds.indexOf(id);
+  if (at === 0) return;
+  if (at > 0) mruSessionIds.splice(at, 1);
+  mruSessionIds.unshift(id);
+}
+
+/** Alive session ids ordered by recency of focus, falling back to creation
+ * order (the server's own list order) for anything never actually visited. */
+function byRecency(aliveIds: string[]): string[] {
+  const alive = new Set(aliveIds);
+  const recent = mruSessionIds.filter((id) => alive.has(id));
+  const rest = aliveIds.filter((id) => !recent.includes(id));
+  return [...recent, ...rest];
+}
+
 function reconcileLayout(list: SessionMeta[]): void {
   const existing = new Set(list.map((s) => s.id));
-  // Prefer a living session when filling a pane whose terminal disappeared.
+  for (let i = mruSessionIds.length - 1; i >= 0; i--) {
+    if (!existing.has(mruSessionIds[i]!)) mruSessionIds.splice(i, 1);
+  }
+  // Prefer whichever living session was looked at most recently when filling
+  // a pane whose terminal disappeared.
   const pruned = pruneMissingSessions(
     layoutRoot.value,
     existing,
-    list.filter((s) => s.alive).map((s) => s.id),
+    byRecency(list.filter((s) => s.alive).map((s) => s.id)),
   );
   if (pruned !== layoutRoot.value) {
     layoutRoot.value = pruned;
@@ -228,6 +272,7 @@ export function focusSession(id: string): void {
   layoutRoot.value = setPaneSession(layoutRoot.value, activePaneId.value, id);
   queueMicrotask(() => peekTerminal(id)?.focus());
   persistLayoutSoon();
+  touchMru(id);
 }
 
 export function focusPane(paneId: string): void {
@@ -239,6 +284,7 @@ export function focusPane(paneId: string): void {
   // Clicking into a pane means this device is the one in use, even if the
   // terminal already had focus and no focus event fired.
   term?.claimSize();
+  touchMru(leaf.sessionId);
 }
 
 export function assignSessionToPane(paneId: string, sessionId: string | null): void {
@@ -519,7 +565,7 @@ export async function boot(): Promise<void> {
       health.value = healthRes;
       ptydStatus.value = healthRes.ptyd;
       prefs.value = prefsRes.prefs;
-      keymap.value = keymapRes.keymap;
+      sharedKeymap.value = keymapRes.keymap;
       sessions.value = sessionRes.sessions;
     });
 

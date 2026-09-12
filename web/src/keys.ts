@@ -1,12 +1,20 @@
 /**
  * Global keyboard handling.
  *
- * Only two things are intercepted before the terminal sees them: the leader
- * chord, and the single key that follows it. Everything else — including every
- * Ctrl combination a shell or vim expects — passes straight through.
+ * Three things can intercept a keystroke before the terminal sees it: the
+ * leader chord and the key that follows it, and — when the direct layer is
+ * turned on — a single modifier+key chord matched with no leader at all.
+ * Everything else, including every Ctrl combination a shell or vim expects,
+ * passes straight through. The master switch (`keymap.value.enabled`) can
+ * disable both at once.
  */
 
-import { chordFromEvent, chordMatches, normalizeKey } from '../../src/shared/keymap.ts';
+import {
+  chordFromEvent,
+  chordId,
+  chordMatches,
+  normalizeKey,
+} from '../../src/shared/keymap.ts';
 import { runAction } from './actions.ts';
 import {
   keymap,
@@ -40,6 +48,26 @@ export function installKeyHandler(): () => void {
     // Modifier keys on their own never complete or arm anything.
     if (['control', 'alt', 'shift', 'meta'].includes(chord.key)) return;
 
+    // Escape dismissing an open overlay is ordinary UI behaviour, not a
+    // shortcut a user opted into — keep it working even with the master
+    // switch off. Skipped while the leader is armed, where Escape means
+    // "cancel the pending chord" instead (handled below).
+    if (chord.key === 'escape' && !leaderArmed.value) {
+      if (paletteOpen.value || settingsOpen.value || searchOpen.value || renamingId.value) {
+        event.preventDefault();
+        event.stopPropagation();
+        paletteOpen.value = false;
+        settingsOpen.value = false;
+        searchOpen.value = false;
+        renamingId.value = null;
+        return;
+      }
+    }
+
+    // The master switch reads live off the signal, so flipping it in Settings
+    // takes effect immediately without needing to reinstall this listener.
+    if (!keymap.value.enabled) return;
+
     if (leaderArmed.value) {
       event.preventDefault();
       event.stopPropagation();
@@ -50,23 +78,22 @@ export function installKeyHandler(): () => void {
       return;
     }
 
+    // Direct bindings match a complete chord, so they cannot collide with the
+    // leader (a single specific chord) or with plain typing (no modifier).
+    if (keymap.value.direct) {
+      const action = keymap.value.directBindings[chordId(chord)];
+      if (action) {
+        event.preventDefault();
+        event.stopPropagation();
+        runAction(action);
+        return;
+      }
+    }
+
     if (chordMatches(keymap.value.leader, chord)) {
       event.preventDefault();
       event.stopPropagation();
       arm();
-      return;
-    }
-
-    // Escape closes whatever overlay is open, and only then falls through.
-    if (chord.key === 'escape') {
-      if (paletteOpen.value || settingsOpen.value || searchOpen.value || renamingId.value) {
-        event.preventDefault();
-        event.stopPropagation();
-        paletteOpen.value = false;
-        settingsOpen.value = false;
-        searchOpen.value = false;
-        renamingId.value = null;
-      }
     }
   };
 

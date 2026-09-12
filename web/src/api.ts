@@ -5,7 +5,7 @@
 
 import type { PtydStatus, ResizePolicy, SessionMeta } from '../../src/shared/protocol.ts';
 import type { Prefs } from '../../src/shared/prefs.ts';
-import type { Keymap } from '../../src/shared/keymap.ts';
+import type { SharedKeymap } from '../../src/shared/keymap.ts';
 
 export class ApiError extends Error {
   constructor(
@@ -133,8 +133,10 @@ export const api = {
   savePrefs: (prefs: Partial<Prefs>) =>
     call<{ prefs: Prefs }>('PUT', '/api/prefs', { prefs }),
 
-  keymap: () => call<{ keymap: Keymap }>('GET', '/api/keymap'),
+  // Only the shared half — what each key does. Whether either layer is
+  // active right now never leaves this browser; see local-shortcuts.ts.
+  keymap: () => call<{ keymap: SharedKeymap }>('GET', '/api/keymap'),
 
-  saveKeymap: (keymap: Keymap) =>
-    call<{ keymap: Keymap }>('PUT', '/api/keymap', { keymap }),
+  saveKeymap: (keymap: SharedKeymap) =>
+    call<{ keymap: SharedKeymap }>('PUT', '/api/keymap', { keymap }),
 };

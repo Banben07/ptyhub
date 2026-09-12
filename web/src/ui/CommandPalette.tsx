@@ -4,7 +4,12 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { actions, shortcutFor, type ActionId } from '../../../src/shared/keymap.ts';
+import {
+  actions,
+  directShortcutFor,
+  shortcutFor,
+  type ActionId,
+} from '../../../src/shared/keymap.ts';
 import { runAction } from '../actions.ts';
 import { focusSession, keymap, paletteOpen, sessions } from '../state.ts';
 import { TerminalIcon } from './icons.tsx';
@@ -48,13 +53,18 @@ export function CommandPalette() {
       run: () => focusSession(session.id),
     }));
 
-    const actionEntries: Entry[] = actions.map((action) => ({
-      key: `action:${action.id}`,
-      label: action.label,
-      hint: shortcutFor(keymap.value, action.id as ActionId) ?? '',
-      group: action.group,
-      run: () => runAction(action.id),
-    }));
+    const actionEntries: Entry[] = actions.map((action) => {
+      // Prefer the direct Mac-style chord when it is actually active — it is
+      // the shorter, more familiar hint for whoever turned that layer on.
+      const direct = keymap.value.direct ? directShortcutFor(keymap.value, action.id) : null;
+      return {
+        key: `action:${action.id}`,
+        label: action.label,
+        hint: direct ?? shortcutFor(keymap.value, action.id as ActionId) ?? '',
+        group: action.group,
+        run: () => runAction(action.id),
+      };
+    });
 
     return [...sessionEntries, ...actionEntries];
   }, [sessions.value, keymap.value]);

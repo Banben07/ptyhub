@@ -1,14 +1,39 @@
 /**
  * Keyboard bindings.
  *
- * Everything goes through a leader prefix. A terminal needs almost every plain
- * key combination for itself, and a browser has already claimed Ctrl/Cmd+N, +W,
- * +T and +K, so a prefix is the only scheme that steals nothing.
+ * There are two layers, and either can be switched off independently of the
+ * other via the master switch below.
  *
- * The default leader is Ctrl+\, which is also the detach prefix in `ptyhub
+ * **Leader bindings** go through a prefix chord. A terminal needs almost every
+ * plain key combination for itself, and a browser has already claimed
+ * Ctrl/Cmd+N, +W, +T and +K, so a prefix is the only scheme that steals
+ * nothing. The default leader is Ctrl+\, also the detach prefix in `ptyhub
  * attach`. It is deliberately NOT Ctrl+Space: that is the input-method toggle
  * on Windows, macOS and Linux, so for anyone typing Chinese, Japanese or Korean
  * the keystroke is swallowed by the IME and the browser never sees it.
+ *
+ * **Direct bindings** fire on a single modifier+key chord with no leader —
+ * Cmd+W to close, Cmd+1 to jump to terminal 1, the shape of a native Mac app.
+ * In an ordinary browser tab several of these (Cmd/Ctrl+W, +T, +N and their
+ * Shift variants) are reserved by the browser itself and cannot be
+ * intercepted by page JavaScript, by design, so users get trapped in an
+ * unclosable tab. They work as intended in a window that does not have that
+ * browser chrome to begin with — an installed PWA in standalone mode, or a
+ * browser launched in app/kiosk mode — which is why this layer defaults to
+ * off and is a deliberate opt-in for people running ptyhub that way.
+ *
+ * The master switch turns off both layers at once, a safety valve for anyone
+ * who just wants a plain page with no keystrokes intercepted at all.
+ *
+ * **On/off is per device, not synced.** Whether a browser should be
+ * intercepting keys at all depends on what that specific browser window is —
+ * a plain tab, or a shortcut-free app-mode wrapper — which is a property of
+ * the device, not a taste you'd want copied everywhere you sign in. So
+ * `enabled` and `direct` live in that browser's own `localStorage` and never
+ * touch the server; `SharedKeymap` (the leader chord and both binding tables —
+ * "what does each key do") is what actually syncs, the same way theme and font
+ * do. `Keymap` is the two merged together, and is what the rest of the app
+ * reads from.
  *
  * Browser-safe: types and pure functions only.
  */
@@ -77,49 +102,32 @@ export interface Chord {
 }
 
 /** Bumped when a stored keymap needs migrating; see `normalizeKeymap`. */
-export const KEYMAP_VERSION = 2;
+export const KEYMAP_VERSION = 3;
 
-export interface Keymap {
+/** The part that syncs across devices: what each key does. */
+export interface SharedKeymap {
   version?: number;
   leader: Chord;
   /** Key pressed after the leader, mapped to an action. */
   bindings: Record<string, ActionId>;
+  /** Keyed by `chordId()`, so each entry is a complete chord including its modifier. */
+  directBindings: Record<string, ActionId>;
 }
 
-export const defaultKeymap: Keymap = {
-  version: KEYMAP_VERSION,
-  leader: { ctrl: true, alt: false, shift: false, meta: false, key: '\\' },
-  bindings: {
-    c: 'new-session',
-    x: 'close-session',
-    r: 'rename-session',
-    n: 'next-session',
-    p: 'prev-session',
-    '1': 'select-session-1',
-    '2': 'select-session-2',
-    '3': 'select-session-3',
-    '4': 'select-session-4',
-    '5': 'select-session-5',
-    '6': 'select-session-6',
-    '7': 'select-session-7',
-    '8': 'select-session-8',
-    '9': 'select-session-9',
-    '|': 'split-right',
-    '\\': 'split-right',
-    '-': 'split-down',
-    w: 'close-pane',
-    o: 'next-pane',
-    f: 'search',
-    k: 'command-palette',
-    ',': 'settings',
-    b: 'toggle-sidebar',
-    '+': 'font-bigger',
-    '=': 'font-bigger',
-    _: 'font-smaller',
-    '0': 'font-reset',
-    l: 'clear-screen',
-  },
-};
+/** The part that stays on this device: whether either layer is active right now. */
+export interface LocalShortcutState {
+  /** Master switch. False disables both the leader and the direct layer. */
+  enabled: boolean;
+  /** Enables the Mac-style modifier+key layer. Off by default. */
+  direct: boolean;
+}
+
+/** Everything merged together — what `keys.ts` and the UI actually read. */
+export type Keymap = SharedKeymap & LocalShortcutState;
+
+export function mergeKeymap(shared: SharedKeymap, local: LocalShortcutState): Keymap {
+  return { ...shared, ...local };
+}
 
 export function normalizeKey(key: string): string {
   if (key === ' ') return 'space';
@@ -153,6 +161,26 @@ export function chordMatches(chord: Chord, event: Chord): boolean {
   );
 }
 
+/**
+ * Stable dictionary key for a full chord, modifiers included. Used for the
+ * direct-binding map, where — unlike the leader's single-key bindings — the
+ * modifier is part of what distinguishes one shortcut from another.
+ */
+export function chordId(chord: Chord): string {
+  const parts: string[] = [];
+  if (chord.ctrl) parts.push('ctrl');
+  if (chord.alt) parts.push('alt');
+  if (chord.shift) parts.push('shift');
+  if (chord.meta) parts.push('meta');
+  parts.push(chord.key);
+  return parts.join('+');
+}
+
+/** True when a chord carries no modifier — unsafe as a direct binding. */
+export function isBareKey(chord: Chord): boolean {
+  return !chord.ctrl && !chord.alt && !chord.meta;
+}
+
 export function formatChord(chord: Chord): string {
   const parts: string[] = [];
   if (chord.ctrl) parts.push('Ctrl');
@@ -161,6 +189,17 @@ export function formatChord(chord: Chord): string {
   if (chord.meta) parts.push('Meta');
   parts.push(chord.key === 'space' ? 'Space' : chord.key.toUpperCase());
   return parts.join('+');
+}
+
+/** Mac-style rendering for the direct layer: ⌘⇧D rather than Meta+Shift+D. */
+export function formatChordMac(chord: Chord): string {
+  const parts: string[] = [];
+  if (chord.ctrl) parts.push('⌃');
+  if (chord.alt) parts.push('⌥');
+  if (chord.shift) parts.push('⇧');
+  if (chord.meta) parts.push('⌘');
+  parts.push(chord.key === 'space' ? 'Space' : chord.key.toUpperCase());
+  return parts.join('');
 }
 
 /**
@@ -195,53 +234,241 @@ export function leaderConflict(chord: Chord): string | null {
   return null;
 }
 
-const actionIds = new Set<string>(actions.map((a) => a.id));
+/**
+ * Explain why a chord is unsafe or unlikely to work as a direct binding, or
+ * null when it is fine. Distinct from `leaderConflict`: a direct binding IS
+ * exactly a bare modifier+key combo by design, so the bar here is "does this
+ * specific one still get eaten upstream", not "does any modifier combo".
+ */
+export function directConflict(chord: Chord): string | null {
+  if (isBareKey(chord)) {
+    return 'needs at least one modifier key — a bare key would fire while typing';
+  }
+  if ((chord.ctrl || chord.meta) && !chord.shift && !chord.alt) {
+    const reserved: Record<string, string> = {
+      t: 'new tab',
+      n: 'new window',
+      w: 'close tab',
+      q: 'quit the browser',
+    };
+    const reason = reserved[chord.key];
+    if (reason) {
+      return `reserved by the browser for "${reason}" in a normal tab — works in an installed/standalone or app-mode window`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Mac-idiom defaults for the direct layer, expressed once per logical combo
+ * and instantiated under both Ctrl and Meta so the same set is reachable with
+ * either the Mac or the Windows/Linux primary modifier.
+ *
+ * Chosen from existing, well-known conventions rather than invented: tab
+ * lifecycle and navigation match iTerm2/Terminal.app (Cmd+T/W, Cmd+D and
+ * Cmd+Shift+D for splits, Cmd+Shift+[ / ] for prev/next, Cmd+K to clear,
+ * Cmd+1..9 to jump), and the rest match universal Mac app conventions
+ * (Cmd+, for preferences, Cmd+F to find, Cmd+B to toggle a sidebar, Cmd+Shift+P
+ * for a command palette as in VS Code, Cmd+=/-/0 to zoom).
+ */
+const DIRECT_DEFAULTS: { key: string; shift?: boolean; action: ActionId }[] = [
+  { key: 't', action: 'new-session' },
+  { key: 'w', action: 'close-session' },
+  { key: 'd', action: 'split-right' },
+  { key: 'd', shift: true, action: 'split-down' },
+  { key: ']', shift: true, action: 'next-session' },
+  { key: '[', shift: true, action: 'prev-session' },
+  { key: ',', action: 'settings' },
+  { key: 'f', action: 'search' },
+  { key: 'p', shift: true, action: 'command-palette' },
+  { key: 'b', action: 'toggle-sidebar' },
+  { key: 'k', action: 'clear-screen' },
+  { key: '=', action: 'font-bigger' },
+  { key: '+', action: 'font-bigger' },
+  { key: '-', action: 'font-smaller' },
+  { key: '_', action: 'font-smaller' },
+  { key: '0', action: 'font-reset' },
+  ...Array.from({ length: 9 }, (_, i) => ({
+    key: String(i + 1),
+    action: `select-session-${i + 1}` as ActionId,
+  })),
+];
+
+function buildDefaultDirectBindings(): Record<string, ActionId> {
+  const out: Record<string, ActionId> = {};
+  for (const entry of DIRECT_DEFAULTS) {
+    for (const primary of ['ctrl', 'meta'] as const) {
+      const id = chordId({
+        ctrl: primary === 'ctrl',
+        meta: primary === 'meta',
+        alt: false,
+        shift: entry.shift ?? false,
+        key: entry.key,
+      });
+      out[id] = entry.action;
+    }
+  }
+  return out;
+}
+
+export const defaultLocalShortcuts: LocalShortcutState = {
+  enabled: true,
+  // Off by default: safe for a plain browser tab, where several direct combos
+  // would otherwise be swallowed by the browser instead of the page.
+  direct: false,
+};
+
+export const defaultSharedKeymap: SharedKeymap = {
+  version: KEYMAP_VERSION,
+  leader: { ctrl: true, alt: false, shift: false, meta: false, key: '\\' },
+  bindings: {
+    c: 'new-session',
+    x: 'close-session',
+    r: 'rename-session',
+    n: 'next-session',
+    p: 'prev-session',
+    '1': 'select-session-1',
+    '2': 'select-session-2',
+    '3': 'select-session-3',
+    '4': 'select-session-4',
+    '5': 'select-session-5',
+    '6': 'select-session-6',
+    '7': 'select-session-7',
+    '8': 'select-session-8',
+    '9': 'select-session-9',
+    '|': 'split-right',
+    '\\': 'split-right',
+    '-': 'split-down',
+    w: 'close-pane',
+    o: 'next-pane',
+    f: 'search',
+    k: 'command-palette',
+    ',': 'settings',
+    b: 'toggle-sidebar',
+    '+': 'font-bigger',
+    '=': 'font-bigger',
+    _: 'font-smaller',
+    '0': 'font-reset',
+    l: 'clear-screen',
+  },
+  directBindings: buildDefaultDirectBindings(),
+};
+
+/** For convenience where a single fully-populated `Keymap` is handy (tests, fallbacks). */
+export const defaultKeymap: Keymap = mergeKeymap(defaultSharedKeymap, defaultLocalShortcuts);
+
+/**
+ * Every valid binding target, for validating stored keymaps.
+ *
+ * Deliberately NOT the same set as `actions`: that list is what the command
+ * palette and rebind tables show, and leaves out `select-session-1..9` since
+ * nine near-identical "jump to terminal N" rows would not be worth showing
+ * there. But a keymap can legitimately bind a key to one of them (both the
+ * leader's digit keys and the direct layer's Cmd+1..9 do), so validation has
+ * to check against the full `ActionId` space, not the display list — using
+ * the display list here silently stripped every digit binding on the very
+ * first server round trip.
+ */
+const SELECT_SESSION_IDS: ActionId[] = Array.from(
+  { length: 9 },
+  (_, i) => `select-session-${i + 1}` as ActionId,
+);
+const actionIds = new Set<string>([...actions.map((a) => a.id), ...SELECT_SESSION_IDS]);
 
 /** The leader we shipped first, which turned out to collide with every IME. */
 function isRetiredDefaultLeader(chord: Chord): boolean {
   return chord.ctrl && !chord.alt && !chord.meta && chord.key === 'space';
 }
 
-export function normalizeKeymap(input: unknown): Keymap {
-  const raw = (input ?? {}) as Partial<Keymap>;
-  const leader = raw.leader;
-  const bindings: Record<string, ActionId> = {};
+function normalizeChord(value: unknown, fallback: Chord): Chord {
+  if (!value || typeof value !== 'object' || typeof (value as Chord).key !== 'string') {
+    return fallback;
+  }
+  const raw = value as Partial<Chord>;
+  return {
+    ctrl: raw.ctrl === true,
+    alt: raw.alt === true,
+    shift: raw.shift === true,
+    meta: raw.meta === true,
+    key: normalizeKey(raw.key!),
+  };
+}
 
+/**
+ * Validate a stored or received `SharedKeymap`.
+ *
+ * Note this deliberately does not read `enabled`/`direct` even if a caller
+ * passes an object that has them (e.g. a full `Keymap`) — those two live on
+ * the device, never on the server, so this function has no opinion on them.
+ */
+export function normalizeSharedKeymap(input: unknown): SharedKeymap {
+  const raw = (input ?? {}) as Partial<SharedKeymap>;
+
+  const bindings: Record<string, ActionId> = {};
   for (const [key, action] of Object.entries(raw.bindings ?? {})) {
     if (typeof key === 'string' && key.length > 0 && actionIds.has(String(action))) {
       bindings[normalizeKey(key)] = action as ActionId;
     }
   }
 
-  let resolvedLeader =
-    leader && typeof leader === 'object' && typeof leader.key === 'string'
-      ? {
-          ctrl: leader.ctrl === true,
-          alt: leader.alt === true,
-          shift: leader.shift === true,
-          meta: leader.meta === true,
-          key: normalizeKey(leader.key),
-        }
-      : defaultKeymap.leader;
+  const directBindings: Record<string, ActionId> = {};
+  for (const [id, action] of Object.entries(raw.directBindings ?? {})) {
+    if (typeof id === 'string' && id.length > 0 && actionIds.has(String(action))) {
+      directBindings[id] = action as ActionId;
+    }
+  }
+
+  let resolvedLeader = normalizeChord(raw.leader, defaultSharedKeymap.leader);
 
   // Migrate keymaps written before the leader moved off Ctrl+Space. That value
   // was never a real choice — it was our default, and it does not work at all
   // for anyone with an input method installed.
   if ((raw.version ?? 1) < 2 && isRetiredDefaultLeader(resolvedLeader)) {
-    resolvedLeader = defaultKeymap.leader;
+    resolvedLeader = defaultSharedKeymap.leader;
   }
 
   return {
     version: KEYMAP_VERSION,
     leader: resolvedLeader,
-    bindings: Object.keys(bindings).length > 0 ? bindings : defaultKeymap.bindings,
+    bindings: Object.keys(bindings).length > 0 ? bindings : defaultSharedKeymap.bindings,
+    directBindings:
+      Object.keys(directBindings).length > 0
+        ? directBindings
+        : defaultSharedKeymap.directBindings,
   };
 }
 
-/** Human-readable shortcut for an action, e.g. "Ctrl+Space C". */
-export function shortcutFor(keymap: Keymap, action: ActionId): string | null {
+/** Validate a device's local on/off state, e.g. as read from `localStorage`. */
+export function normalizeLocalShortcuts(input: unknown): LocalShortcutState {
+  const raw = (input ?? {}) as Partial<LocalShortcutState>;
+  return {
+    enabled: raw.enabled !== false,
+    direct: raw.direct === true,
+  };
+}
+
+/** Human-readable leader shortcut for an action, e.g. "Ctrl+\ C". */
+export function shortcutFor(keymap: SharedKeymap, action: ActionId): string | null {
   const entry = Object.entries(keymap.bindings).find(([, id]) => id === action);
   if (!entry) return null;
   const key = entry[0] === 'space' ? 'Space' : entry[0]!.toUpperCase();
   return `${formatChord(keymap.leader)} ${key}`;
+}
+
+/** Mac-style direct shortcut for an action, e.g. "⌘W", or null if unbound. */
+export function directShortcutFor(keymap: SharedKeymap, action: ActionId): string | null {
+  // Prefer the Meta-modifier entry when both Ctrl and Meta variants exist —
+  // it is the one worth showing since this layer is styled after macOS.
+  const entries = Object.entries(keymap.directBindings).filter(([, id]) => id === action);
+  if (entries.length === 0) return null;
+  const [id] = entries.find(([key]) => key.includes('meta')) ?? entries[0]!;
+  const parts = id.split('+');
+  const key = parts.pop()!;
+  return formatChordMac({
+    ctrl: parts.includes('ctrl'),
+    alt: parts.includes('alt'),
+    shift: parts.includes('shift'),
+    meta: parts.includes('meta'),
+    key,
+  });
 }

@@ -5,7 +5,7 @@
 
 import type { Config } from '../shared/config.ts';
 import { paths, readJson, writeJson } from '../shared/config.ts';
-import { defaultKeymap, normalizeKeymap } from '../shared/keymap.ts';
+import { defaultSharedKeymap, normalizeSharedKeymap } from '../shared/keymap.ts';
 import { PtydError } from '../shared/ptyd-client.ts';
 import { VERSION } from '../shared/version.ts';
 import type { Ctx, Router } from './http-util.ts';
@@ -189,9 +189,12 @@ export function registerRestRoutes(router: Router, deps: RestDeps): void {
     sendJson(ctx.res, 200, { prefs: prefs.update(body.prefs ?? body) });
   });
 
+  // What each key does — synced across devices, the same way theme and font
+  // are. Whether either layer is *active* right now is a per-device decision
+  // the browser keeps to itself in localStorage; the server never sees it.
   router.get('/api/keymap', (ctx: Ctx) => {
-    const stored = readJson<unknown>(paths.keymap, defaultKeymap);
-    const keymap = normalizeKeymap(stored);
+    const stored = readJson<unknown>(paths.keymap, defaultSharedKeymap);
+    const keymap = normalizeSharedKeymap(stored);
     // Persist migrations so the file on disk matches what the UI is using.
     if (JSON.stringify(stored) !== JSON.stringify(keymap)) {
       try {
@@ -205,7 +208,7 @@ export function registerRestRoutes(router: Router, deps: RestDeps): void {
 
   router.put('/api/keymap', async (ctx: Ctx) => {
     const body = await readJsonBody<{ keymap?: unknown }>(ctx.req);
-    const keymap = normalizeKeymap(body.keymap ?? body);
+    const keymap = normalizeSharedKeymap(body.keymap ?? body);
     writeJson(paths.keymap, keymap, 0o644);
     sendJson(ctx.res, 200, { keymap });
   });

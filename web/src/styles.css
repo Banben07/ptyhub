@@ -1350,6 +1350,32 @@ select,
   color: var(--text-muted);
 }
 
+.binding-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.binding-caveat {
+  font-size: 10.5px;
+  color: var(--warning);
+  font-weight: 400;
+  cursor: help;
+}
+
+.settings-subhead {
+  margin: 22px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings-subhead:first-of-type {
+  margin-top: 6px;
+}
+
 .device-list {
   display: flex;
   flex-direction: column;

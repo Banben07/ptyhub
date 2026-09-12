@@ -81,6 +81,37 @@ async function tabNames(page: Page): Promise<string[]> {
 }
 
 /**
+ * Dispatch a synthetic keydown directly to the document.
+ *
+ * Real key presses for combos like Ctrl+W go through the browser's own
+ * accelerator table first, which is exactly the behaviour the direct-shortcut
+ * feature is opting out of (or into, in an app-mode window) — but it makes
+ * `page.keyboard.press` an unreliable way to test our handler, since a real
+ * browser might act on the combo before our JavaScript ever sees it. A
+ * synthetic event dispatched straight to the document exercises our listener
+ * deterministically, independent of what a real OS/browser would do with it.
+ */
+async function dispatchChord(
+  page: Page,
+  opts: { key: string; ctrl?: boolean; alt?: boolean; shift?: boolean; meta?: boolean },
+): Promise<void> {
+  await page.evaluate((o) => {
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: o.key,
+        ctrlKey: !!o.ctrl,
+        altKey: !!o.alt,
+        shiftKey: !!o.shift,
+        metaKey: !!o.meta,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }, opts);
+  await sleep(250);
+}
+
+/**
  * Leader chord followed by a key, the way a user would press it.
  *
  * Ctrl+Backslash, not Ctrl+Space: the latter is the input-method toggle on
@@ -322,6 +353,45 @@ async function main(): Promise<void> {
       `${tabsBefore} tabs before`,
     );
 
+    // --- closing a terminal returns to whichever one you looked at before it,
+    // not whichever happens to be oldest ----------------------------------
+
+    // Three throwaway terminals, visited out of creation order, so recency and
+    // creation order disagree about which one should reappear.
+    await leader(page, 'c');
+    await waitFor('tab A', async () => (await page.locator('.tab').count()) === 2, 6000);
+    const idA = await page.locator('.tab').nth(1).getAttribute('data-tab-id');
+    await leader(page, 'c');
+    await waitFor('tab B', async () => (await page.locator('.tab').count()) === 3, 6000);
+    const idB = await page.locator('.tab').nth(2).getAttribute('data-tab-id');
+    await leader(page, 'c');
+    await waitFor('tab C', async () => (await page.locator('.tab').count()) === 4, 6000);
+    const idC = await page.locator('.tab').nth(3).getAttribute('data-tab-id');
+
+    // Visit order: A, then C, then B. B ends up active; C — not A, the oldest
+    // survivor — is what "last visited before this one" actually means here.
+    await page.locator(`[data-tab-id="${idA}"]`).click();
+    await sleep(150);
+    await page.locator(`[data-tab-id="${idC}"]`).click();
+    await sleep(150);
+    await page.locator(`[data-tab-id="${idB}"]`).click();
+    await sleep(150);
+
+    await page.locator(`[data-tab-id="${idB}"] .tab-close`).click();
+    await sleep(400);
+    const afterClose = await page.evaluate(() => (window as any).__ptyhub.active());
+    check(
+      'closing the active terminal reveals the one visited just before it',
+      afterClose === idC,
+      `landed on ${afterClose}, expected ${idC} (oldest survivor was ${idA})`,
+    );
+
+    // Clean up the remaining two throwaway tabs.
+    await page.locator(`[data-tab-id="${idC}"] .tab-close`).click();
+    await sleep(300);
+    await page.locator(`[data-tab-id="${idA}"] .tab-close`).click();
+    await waitFor('back to one tab', async () => (await page.locator('.tab').count()) === 1, 4000);
+
     await leader(page, 'k');
     const paletteOpen = await page.locator('.palette').isVisible().catch(() => false);
     check('leader K opens the command palette', paletteOpen);
@@ -331,6 +401,210 @@ async function main(): Promise<void> {
     await leader(page, ',');
     const settingsVisible = await page.locator('.settings').isVisible().catch(() => false);
     check('leader , opens settings', settingsVisible);
+    // Settings' own backdrop covers the whole viewport, tab strip included;
+    // close it before touching anything in the tab bar.
+    await page.keyboard.press('Escape');
+    await sleep(250);
+
+    // --- leader digit shortcuts survive a real server round trip -----------
+
+    // Regression coverage for a bug the direct-shortcut work below turned up:
+    // the keymap validated stored bindings against the command-palette display
+    // list, which leaves out select-session-1..9, so every digit binding — on
+    // the leader AND, once added, the direct layer — was silently stripped the
+    // first time the keymap crossed the network. `keymap.value` here already
+    // went through exactly that round trip during boot().
+    await leader(page, 'c');
+    await waitFor(
+      'a second tab for leader-digit switching',
+      async () => (await page.locator('.tab').count()) === 2,
+      8000,
+    );
+    const digitTargetId = await page.locator('.tab').nth(0).getAttribute('data-tab-id');
+    await leader(page, '1');
+    await sleep(300);
+    const afterLeaderDigit = await page.evaluate(() => (window as any).__ptyhub.active());
+    check(
+      'leader 1 switches to the first terminal after a real save/load round trip',
+      afterLeaderDigit === digitTargetId,
+      `${afterLeaderDigit} vs ${digitTargetId}`,
+    );
+    await page.locator('.tab').last().locator('.tab-close').click();
+    await waitFor('back to one tab', async () => (await page.locator('.tab').count()) === 1, 4000);
+
+    // --- master switch and Mac-style direct shortcuts -----------------------
+
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await sleep(200);
+    check(
+      'the master switch and Mac-style toggle are both in Settings',
+      (await page.locator('.setting:has-text("Enable keyboard shortcuts")').count()) === 1 &&
+        (await page.locator('.setting:has-text("Enable Mac-style shortcuts")').count()) === 1,
+    );
+    // The gear button opens Settings but cannot close it: the panel's own
+    // full-screen backdrop sits on top of the topbar and swallows the click.
+    // Escape is the way out, and it works regardless of the master switch.
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
+    // A throwaway tab so this section cannot disturb the sessions later parts
+    // of the run depend on.
+    await leader(page, 'c');
+    await waitFor(
+      'throwaway tab',
+      async () => (await page.locator('.tab').count()) >= 1,
+      6000,
+    );
+    const tabsAtStart = await page.locator('.tab').count();
+
+    check(
+      'Mac-style shortcuts are off by default, so ⌘W does nothing in a plain tab',
+      await (async () => {
+        await dispatchChord(page, { key: 'w', meta: true });
+        return (await page.locator('.tab').count()) === tabsAtStart;
+      })(),
+    );
+
+    // Turn the direct layer on.
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await page.locator('.setting:has-text("Enable Mac-style shortcuts") .toggle').click();
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
+    await page.click('.pane-slot');
+    check(
+      '⌘W closes the current terminal once Mac-style shortcuts are on',
+      await (async () => {
+        await dispatchChord(page, { key: 'w', meta: true });
+        return waitFor(
+          'tab count to drop',
+          async () => (await page.locator('.tab').count()) === tabsAtStart - 1,
+          4000,
+        );
+      })(),
+    );
+
+    // ⌘1 / ⌘2 jump straight to a terminal by position, no leader required.
+    await leader(page, 'c');
+    await waitFor('second tab for switching', async () => (await page.locator('.tab').count()) === 2, 6000);
+    const idAtSlot1 = await page.locator('.tab').nth(0).getAttribute('data-tab-id');
+    await dispatchChord(page, { key: '2', meta: true });
+    await sleep(200);
+    const afterMeta2 = await page.evaluate(() => (window as any).__ptyhub.active());
+    const idAtSlot2 = await page.locator('.tab').nth(1).getAttribute('data-tab-id');
+    check('⌘2 switches directly to the second terminal', afterMeta2 === idAtSlot2, `${afterMeta2} vs ${idAtSlot2}`);
+    await dispatchChord(page, { key: '1', meta: true });
+    await sleep(200);
+    const afterMeta1 = await page.evaluate(() => (window as any).__ptyhub.active());
+    check('⌘1 switches back to the first terminal', afterMeta1 === idAtSlot1, `${afterMeta1} vs ${idAtSlot1}`);
+
+    // The master switch gates the direct layer too, not just the leader.
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await page.locator('.setting:has-text("Enable keyboard shortcuts") .toggle').click();
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
+    const tabsWithMasterOff = await page.locator('.tab').count();
+    await page.click('.pane-slot');
+    await page.keyboard.press('Control+Backslash');
+    await sleep(300);
+    check(
+      'the master switch off stops the leader from arming',
+      (await page.locator('.leader-hint').count()) === 0,
+    );
+    await dispatchChord(page, { key: 'w', meta: true });
+    check(
+      'the master switch off also disables the Mac-style layer',
+      (await page.locator('.tab').count()) === tabsWithMasterOff,
+    );
+
+    // Restore defaults so the remaining leader-based checks below keep working.
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await page.locator('.setting:has-text("Enable keyboard shortcuts") .toggle').click();
+    await page.locator('.setting:has-text("Enable Mac-style shortcuts") .toggle').click();
+    await sleep(200);
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
+    // This section leaves one throwaway tab behind (the ⌘1/⌘2 target); close it
+    // so the rest of the file starts from the single-tab state it expects.
+    await page.locator('.tab').nth(1).locator('.tab-close').click();
+    await waitFor('back to one tab', async () => (await page.locator('.tab').count()) === 1, 4000);
+
+    // --- shortcut on/off is per device, not synced --------------------------
+
+    // The server's own response is the strongest proof: it must not carry
+    // enabled/direct at all, since those never leave the browser that set them.
+    const rawKeymapResponse = await page.evaluate(async () => {
+      const res = await fetch('/api/keymap', { credentials: 'same-origin' });
+      return res.json();
+    });
+    check(
+      'the server keymap response carries no on/off state',
+      !('enabled' in rawKeymapResponse.keymap) && !('direct' in rawKeymapResponse.keymap),
+      JSON.stringify(Object.keys(rawKeymapResponse.keymap)),
+    );
+
+    // Turn Mac-style shortcuts on for this "device" (this browser context).
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await page.locator('.setting:has-text("Enable Mac-style shortcuts") .toggle').click();
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
+    check(
+      'the on/off state lives in localStorage, not a cookie or the server',
+      await page.evaluate(() => localStorage.getItem('ptyhub.localShortcuts')?.includes('"direct":true') ?? false),
+    );
+
+    // A second, independent browser profile signing into the very same
+    // account must NOT inherit that — it is a different device.
+    const otherDevice = await browser.newContext();
+    const otherPage = await otherDevice.newPage();
+    await otherPage.goto(`${origin}/#k=${token}`, { waitUntil: 'domcontentloaded' });
+    await otherPage.waitForSelector('.xterm-screen', { timeout: 20000 });
+    await sleep(500);
+    await otherPage.click('button[title="Settings"]');
+    await sleep(200);
+    await otherPage.click('.settings-tab:has-text("Keyboard")');
+    await sleep(200);
+    const otherDeviceDirectOn = await otherPage
+      .locator('.setting:has-text("Enable Mac-style shortcuts") .toggle.on')
+      .count();
+    check(
+      'a second device signing into the same account starts with its own defaults',
+      otherDeviceDirectOn === 0,
+    );
+    await otherDevice.close();
+
+    // Meanwhile the ORIGINAL device's choice survives a reload, because it
+    // is sitting in that browser's own localStorage.
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.xterm-screen', { timeout: 20000 });
+    await sleep(600);
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await sleep(200);
+    check(
+      "this device's own choice survives a reload",
+      (await page.locator('.setting:has-text("Enable Mac-style shortcuts") .toggle.on').count()) === 1,
+    );
+
+    // Clean up: back to the default (off) so later checks in this file are
+    // unaffected by the direct layer being on.
+    await page.locator('.setting:has-text("Enable Mac-style shortcuts") .toggle').click();
+    await page.keyboard.press('Escape');
+    await sleep(300);
 
     // --- scrollback: the newest output, and a reachable scrollbar ----------
 

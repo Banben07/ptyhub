@@ -8,12 +8,18 @@ import { useEffect, useState } from 'preact/hooks';
 import {
   actions,
   chordFromEvent,
-  defaultKeymap,
+  chordId,
+  defaultLocalShortcuts,
+  defaultSharedKeymap,
+  directConflict,
+  directShortcutFor,
   formatChord,
+  isBareKey,
   leaderConflict,
   normalizeKey,
   type ActionId,
-  type Keymap,
+  type Chord,
+  type SharedKeymap,
 } from '../../../src/shared/keymap.ts';
 import {
   BUILTIN_FONT_STACKS,
@@ -31,7 +37,9 @@ import {
   notify,
   prefs,
   setFontSize,
+  setLocalShortcuts,
   settingsOpen,
+  sharedKeymap,
   theme,
   updateFontPrefs,
   updatePrefs,
@@ -442,8 +450,21 @@ function TerminalSettings() {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * What is currently being recorded, if anything. Leader-sub-bindings only
+ * capture a bare key (the leader chord itself supplies the modifier); direct
+ * bindings capture the whole chord, modifier included.
+ */
+type Recording =
+  | { kind: 'leader' }
+  | { kind: 'sub'; action: ActionId }
+  | { kind: 'direct'; action: ActionId };
+
 function KeyboardSettings() {
-  const [recording, setRecording] = useState<'leader' | ActionId | null>(null);
+  const [recording, setRecording] = useState<Recording | null>(null);
+  // Read from the merged view for display; writes below go to whichever of
+  // `sharedKeymap` (synced) or local-shortcuts (this device only) actually
+  // owns the field being changed.
   const current = keymap.value;
 
   useEffect(() => {
@@ -459,19 +480,26 @@ function KeyboardSettings() {
         return;
       }
 
-      const next: Keymap =
-        recording === 'leader'
-          ? { ...current, leader: chord }
-          : rebind(current, recording, normalizeKey(event.key));
-      save(next);
+      if (recording.kind === 'leader') {
+        saveShared({ ...sharedKeymap.value, leader: chord });
+      } else if (recording.kind === 'sub') {
+        saveShared(rebindLeaderSub(sharedKeymap.value, recording.action, normalizeKey(event.key)));
+      } else {
+        if (isBareKey(chord)) {
+          notify('direct shortcuts need at least one modifier key', 'error');
+          setRecording(null);
+          return;
+        }
+        saveShared(rebindDirect(sharedKeymap.value, recording.action, chord));
+      }
       setRecording(null);
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
-  }, [recording, current]);
+  }, [recording]);
 
-  const save = (next: Keymap) => {
-    keymap.value = next;
+  const saveShared = (next: SharedKeymap) => {
+    sharedKeymap.value = next;
     void api.saveKeymap(next).catch(() => notify('could not save the keymap', 'error'));
   };
 
@@ -485,14 +513,27 @@ function KeyboardSettings() {
   return (
     <section>
       <h2>Keyboard</h2>
+
+      <Field
+        label="Enable keyboard shortcuts"
+        hint="Master switch, local to this browser only — it does not sync to your other devices. Off disables the leader below and the direct shortcuts, leaving a plain page where nothing is ever intercepted."
+      >
+        <Toggle
+          checked={current.enabled}
+          onChange={(value) => setLocalShortcuts({ enabled: value })}
+        />
+      </Field>
+
+      <h3 class="settings-subhead">Leader shortcuts</h3>
       <p class="settings-note">
-        Every shortcut is a leader key followed by one more key, so nothing is taken
-        away from the shell or the browser.
+        Every shortcut here is a leader key followed by one more key, so nothing is
+        taken away from the shell or the browser — the safe default for a plain
+        browser tab.
       </p>
 
       <Field label="Leader key" hint="Press the combination you want.">
-        <button class="btn chord" onClick={() => setRecording('leader')}>
-          {recording === 'leader' ? 'Press a key…' : formatChord(current.leader)}
+        <button class="btn chord" onClick={() => setRecording({ kind: 'leader' })}>
+          {recording?.kind === 'leader' ? 'Press a key…' : formatChord(current.leader)}
         </button>
       </Field>
 
@@ -510,9 +551,9 @@ function KeyboardSettings() {
             <span class="binding-group">{action.group}</span>
             <button
               class="btn chord small"
-              onClick={() => setRecording(action.id)}
+              onClick={() => setRecording({ kind: 'sub', action: action.id })}
             >
-              {recording === action.id ? (
+              {recording?.kind === 'sub' && recording.action === action.id ? (
                 'Press a key…'
               ) : (
                 <>
@@ -525,14 +566,96 @@ function KeyboardSettings() {
         ))}
       </div>
 
-      <button class="btn" onClick={() => save(structuredClone(defaultKeymap))}>
+      <h3 class="settings-subhead">Mac-style shortcuts</h3>
+      <p class="settings-note">
+        Fires straight on the combination shown, no leader needed — the shape of a
+        native Mac app (⌘W to close, ⌘1 to jump to a terminal, and so on). In a plain
+        browser tab, a few combinations are reserved by the browser itself (marked
+        below) and only reach the page in an installed app or an app-mode window
+        with no tab strip. Bound to both ⌘ and Ctrl, so it works with either as the
+        primary modifier.
+      </p>
+
+      <Field
+        label="Enable Mac-style shortcuts"
+        hint="Also local to this browser, independently of the master switch above — turn it on for the app-mode window you use, and leave it off in a plain tab."
+      >
+        <Toggle
+          checked={current.direct}
+          onChange={(value) => setLocalShortcuts({ direct: value })}
+        />
+      </Field>
+
+      <div class="binding-list">
+        {actions.map((action) => {
+          const shortcut = directShortcutFor(current, action.id);
+          const chord = shortcut ? parseDirectDisplay(current, action.id) : null;
+          const conflict = chord ? directConflict(chord) : null;
+          const recordingThis = recording?.kind === 'direct' && recording.action === action.id;
+          return (
+            <div class="binding-row" key={action.id}>
+              <span class="binding-label">
+                {action.label}
+                {conflict && (
+                  <span class="binding-caveat" title={conflict}>
+                    {' '}
+                    app-mode only
+                  </span>
+                )}
+              </span>
+              <span class="binding-group">{action.group}</span>
+              <div class="binding-controls">
+                <button
+                  class="btn chord small"
+                  onClick={() => setRecording({ kind: 'direct', action: action.id })}
+                >
+                  {recordingThis ? 'Press a combo…' : (shortcut ?? '—')}
+                </button>
+                {shortcut && !recordingThis && (
+                  <button
+                    class="icon-btn small"
+                    title="Remove this shortcut"
+                    onClick={() => saveShared(clearDirect(sharedKeymap.value, action.id))}
+                  >
+                    <CloseIcon size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <button
+        class="btn"
+        onClick={() => {
+          saveShared(structuredClone(defaultSharedKeymap));
+          setLocalShortcuts(structuredClone(defaultLocalShortcuts));
+        }}
+      >
         Reset to defaults
       </button>
     </section>
   );
 }
 
-function rebind(current: Keymap, action: ActionId, key: string): Keymap {
+/** Recover the Chord that produced a `directShortcutFor` display, for conflict checks. */
+function parseDirectDisplay(current: SharedKeymap, action: ActionId): Chord | null {
+  const entries = Object.entries(current.directBindings).filter(([, id]) => id === action);
+  if (entries.length === 0) return null;
+  const [id] = entries.find(([key]) => key.includes('meta')) ?? entries[0]!;
+  const parts = id.split('+');
+  const key = parts.pop()!;
+  return {
+    ctrl: parts.includes('ctrl'),
+    alt: parts.includes('alt'),
+    shift: parts.includes('shift'),
+    meta: parts.includes('meta'),
+    key,
+  };
+}
+
+function rebindLeaderSub(current: SharedKeymap, action: ActionId, key: string): SharedKeymap {
   const bindings: Record<string, ActionId> = {};
   for (const [existing, id] of Object.entries(current.bindings)) {
     // Drop the old binding for this action and anything already on the new key.
@@ -541,6 +664,31 @@ function rebind(current: Keymap, action: ActionId, key: string): Keymap {
   }
   bindings[key] = action;
   return { ...current, bindings };
+}
+
+/**
+ * Assign a direct chord to an action, replacing whatever it was bound to
+ * before. Unlike the leader sub-bindings, a direct binding is one exact chord
+ * — recording a new one does not also bind the other OS's modifier the way
+ * the shipped defaults do, since the user is now choosing deliberately.
+ */
+function rebindDirect(current: SharedKeymap, action: ActionId, chord: Chord): SharedKeymap {
+  const id = chordId(chord);
+  const directBindings: Record<string, ActionId> = {};
+  for (const [existingId, existingAction] of Object.entries(current.directBindings)) {
+    if (existingAction === action || existingId === id) continue;
+    directBindings[existingId] = existingAction;
+  }
+  directBindings[id] = action;
+  return { ...current, directBindings };
+}
+
+function clearDirect(current: SharedKeymap, action: ActionId): SharedKeymap {
+  const directBindings: Record<string, ActionId> = {};
+  for (const [existingId, existingAction] of Object.entries(current.directBindings)) {
+    if (existingAction !== action) directBindings[existingId] = existingAction;
+  }
+  return { ...current, directBindings };
 }
 
 // ---------------------------------------------------------------------------

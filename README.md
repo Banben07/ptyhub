@@ -110,7 +110,13 @@ Phones size the session for themselves by default, so the text is readable. Swit
 
 ### Keyboard
 
-Every shortcut is a leader prefix followed by one key. The default leader is `Ctrl+\`, matching the detach prefix in `ptyhub attach`.
+There is a master switch (Settings → Keyboard → "Enable keyboard shortcuts"). Off, ptyhub intercepts nothing at all — a plain page, for anyone who would rather not have any keys captured.
+
+**Both this switch and the Mac-style layer's own on/off toggle are local to the browser you set them in — they never sync.** Whether a given window should be intercepting keys depends on what that window *is* (a plain tab versus a shortcut-free app-mode wrapper), which is a property of the device, not a preference you'd want copied to every browser you sign into. They live in that browser's `localStorage`. Everything else — the leader key, and what every key actually does in both layers — syncs across devices normally, the same way theme and font do.
+
+With shortcuts on, two independent layers are available.
+
+**Leader shortcuts**, on by default: every shortcut is a leader prefix followed by one key, so nothing is taken away from the shell or the browser. This is the safe default for a plain browser tab. The leader is `Ctrl+\` by default, matching the detach prefix in `ptyhub attach`.
 
 | Key | Action | | Key | Action |
 |---|---|---|---|---|
@@ -123,9 +129,13 @@ Every shortcut is a leader prefix followed by one key. The default leader is `Ct
 | `+` / `_` / `0` | Font bigger / smaller / reset | | `l` | Clear screen |
 | `,` | Settings | | | |
 
-Nothing takes `Ctrl/Cmd+N`, `+W`, `+T` or `+K` from the browser, and nothing takes `Ctrl+C`, `Ctrl+D` or `Ctrl+R` from the shell. The whole map lives in `~/.config/ptyhub/keymap.json` and is editable in Settings → Keyboard, leader included.
+**Mac-style direct shortcuts**, off by default: a single modifier+key combo fires immediately, no leader — `⌘W` to close, `⌘1` to jump to terminal 1, the shape of a native Mac app. Each one is bound under both `⌘` and `Ctrl`, so it works with either as the primary modifier. The defaults borrow established conventions rather than inventing new ones: tab lifecycle and navigation match iTerm2/Terminal.app (`⌘T`/`⌘W`, `⌘D` and `⇧⌘D` to split, `⇧⌘[`/`⇧⌘]` for previous/next, `⌘K` to clear), and the rest match universal Mac app conventions (`⌘,` for preferences, `⌘F` to find, `⌘B` to toggle the sidebar, `⇧⌘P` for the command palette as in VS Code, `⌘=`/`⌘-`/`⌘0` to zoom).
 
-**Do not set the leader to `Ctrl+Space`.** That is the input-method toggle on Windows, macOS and Linux; for anyone typing Chinese, Japanese or Korean the keystroke never reaches the page and every shortcut silently stops working. Settings warns about combinations known to be swallowed.
+In an ordinary browser tab, `⌘/Ctrl+W`, `+T` and `+N` are reserved by the browser itself — by design, no page JavaScript can intercept them, so a malicious site can never trap you in an unclosable tab. Settings marks these "app-mode only": they work in an installed PWA running standalone, or a browser launched in app/kiosk mode with no tab strip, which is exactly what they're for. Turn this layer on if you run ptyhub that way; leave it off in a normal tab, where those specific combos would just do nothing.
+
+The whole map — master switch, leader, and both direct bindings — lives in `~/.config/ptyhub/keymap.json` and is editable in Settings → Keyboard.
+
+**Do not set the leader to `Ctrl+Space`.** That is the input-method toggle on Windows, macOS and Linux; for anyone typing Chinese, Japanese or Korean the keystroke never reaches the page and every shortcut silently stops working. Settings warns about combinations known to be swallowed, for both layers.
 
 ### Mobile
 
