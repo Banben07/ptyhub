@@ -1,0 +1,64 @@
+{
+  "name": "ptyhub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent server-side PTY session daemon with a modern web UI",
+  "license": "MIT",
+  "author": "sakamoto",
+  "keywords": [
+    "terminal",
+    "pty",
+    "web-terminal",
+    "tmux-alternative",
+    "xterm",
+    "session-manager"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "ptyhub": "./bin/ptyhub.mjs"
+  },
+  "scripts": {
+    "ptyd": "tsx src/ptyd/index.ts",
+    "web": "tsx src/web/index.ts",
+    "cli": "tsx src/cli/index.ts",
+    "dev": "vite",
+    "build": "vite build",
+    "icons": "tsx scripts/gen-icons.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run test:ptyd && npm run test:web && npm run test:cli && npm run build && npm run test:ui",
+    "test:ptyd": "tsx scripts/smoke-ptyd.ts",
+    "test:web": "tsx scripts/smoke-web.ts",
+    "test:cli": "tsx scripts/smoke-cli.ts",
+    "test:ui": "tsx scripts/smoke-ui.ts"
+  },
+  "dependencies": {
+    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/headless": "^5.5.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@fontsource/jetbrains-mono": "^5.1.0",
+    "@preact/preset-vite": "^2.9.0",
+    "@preact/signals": "^2.11.2",
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/ws": "^8.5.13",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "^0.15.0",
+    "@xterm/addon-unicode11": "^0.8.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/addon-webgl": "^0.18.0",
+    "@xterm/xterm": "^5.5.0",
+    "playwright": "^1.63.0",
+    "preact": "^10.25.0",
+    "qrcode": "^1.5.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}

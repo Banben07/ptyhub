@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="ptyhub">
+  <title>ptyhub</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2130"/>
+      <stop offset="1" stop-color="#0b0d12"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9dbaff"/>
+      <stop offset="1" stop-color="#6b94ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile -->
+  <rect width="512" height="512" rx="116" fill="url(#tile)"/>
+  <rect x="8" y="8" width="496" height="496" rx="110" fill="none" stroke="#2a3346" stroke-width="10"/>
+
+  <!-- Prompt chevron: the mark reads as a shell prompt at any size -->
+  <path d="M140 158 L236 256 L140 354" fill="none" stroke="url(#beam)" stroke-width="46"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Block cursor -->
+  <rect x="266" y="310" width="118" height="44" rx="14" fill="#e6eaf2"/>
+
+  <!-- Attached sessions, fading back -->
+  <g fill="#7aa2ff">
+    <circle cx="418" cy="166" r="17"/>
+    <circle cx="418" cy="228" r="17" opacity="0.68"/>
+    <circle cx="418" cy="290" r="17" opacity="0.42"/>
+  </g>
+</svg>

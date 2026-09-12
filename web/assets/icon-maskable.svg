@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="ptyhub">
+  <title>ptyhub</title>
+  <!--
+    Maskable variant: Android crops adaptive icons to arbitrary shapes, so the
+    background is full-bleed and the artwork stays inside the safe circle
+    (the centre 80%, radius 205 around 256,256).
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2130"/>
+      <stop offset="1" stop-color="#0b0d12"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9dbaff"/>
+      <stop offset="1" stop-color="#6b94ff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#tile)"/>
+
+  <path d="M176 186 L250 256 L176 326" fill="none" stroke="url(#beam)" stroke-width="36"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="272" y="296" width="86" height="32" rx="10" fill="#e6eaf2"/>
+  <g fill="#7aa2ff">
+    <circle cx="374" cy="192" r="12"/>
+    <circle cx="374" cy="236" r="12" opacity="0.6"/>
+    <circle cx="374" cy="280" r="12" opacity="0.28"/>
+  </g>
+</svg>
