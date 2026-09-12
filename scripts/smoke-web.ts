@@ -336,6 +336,188 @@ async function main(): Promise<void> {
 
     evWs.close();
 
+    // --- migrating a keymap saved while direct bindings still auto-registered
+    // both Ctrl and Cmd ---------------------------------------------------
+
+    {
+      const migSandbox = makeSandbox('keymap-mig');
+      const migPort = freePort();
+      fs.writeFileSync(
+        migSandbox.configFile,
+        JSON.stringify({ bind: '127.0.0.1', port: migPort }, null, 2),
+      );
+      // A pre-fix keymap: `ctrl+z` has no Cmd sibling and must survive
+      // untouched, so this proves the migration targets the specific
+      // duplicate pairing rather than stripping every Ctrl entry wholesale.
+      fs.writeFileSync(
+        path.join(migSandbox.env.XDG_CONFIG_HOME!, 'ptyhub', 'keymap.json'),
+        JSON.stringify({
+          version: 3,
+          directBindings: {
+            'ctrl+w': 'close-session',
+            'meta+w': 'close-session',
+            'ctrl+z': 'clear-screen',
+          },
+        }),
+        { mode: 0o644 },
+      );
+
+      const migPtyd = launch('src/ptyd/index.ts', migSandbox.env);
+      await waitFor('mig ptyd socket', () => fs.existsSync(migSandbox.socketFile), 20000);
+      const migWeb = launch('src/web/index.ts', migSandbox.env);
+      await waitFor('mig gateway', () => /listening on/.test(migWeb.logs()), 20000);
+
+      try {
+        const migApi = new Client(`http://127.0.0.1:${migPort}`);
+        const migTokenFile = path.join(migSandbox.env.XDG_STATE_HOME!, 'ptyhub', 'token.json');
+        await waitFor('mig token', () => fs.existsSync(migTokenFile), 10000);
+        const migToken = JSON.parse(fs.readFileSync(migTokenFile, 'utf8')).token as string;
+        await migApi.post('/api/auth/pair', { k: migToken });
+
+        const km = (await migApi.get('/api/keymap')).json.keymap.directBindings;
+        check(
+          'the Cmd entry survives the migration',
+          km['meta+w'] === 'close-session',
+        );
+        check(
+          'the duplicate Ctrl entry is dropped',
+          km['ctrl+w'] === undefined,
+          JSON.stringify(km),
+        );
+        check(
+          "a Ctrl entry with no Cmd sibling is left alone — it wasn't part of the bug",
+          km['ctrl+z'] === 'clear-screen',
+        );
+      } finally {
+        migWeb.stop();
+        migPtyd.stop();
+        await sleep(300);
+        migSandbox.cleanup();
+      }
+    }
+
+    // --- a viewer that cannot keep up is disconnected, not silently desynced --
+    //
+    // Same regression as ptyd's own fix, one layer up: this is the browser-
+    // facing leg (gateway to browser), a separate bottleneck from ptyd-to-
+    // gateway — a slow phone can back this one up while the other stays
+    // perfectly healthy. Silently dropping frames here risks the exact same
+    // permanent desync between the browser's rendered screen and ptyd's
+    // headless copy of it.
+    {
+      const bpSandbox = makeSandbox('web-bp');
+      const bpPort = freePort();
+      const bpOrigin = `http://127.0.0.1:${bpPort}`;
+      fs.writeFileSync(
+        bpSandbox.configFile,
+        JSON.stringify({ bind: '127.0.0.1', port: bpPort }, null, 2),
+      );
+      const bpPtyd = launch('src/ptyd/index.ts', bpSandbox.env);
+      await waitFor('bp ptyd socket', () => fs.existsSync(bpSandbox.socketFile), 20000);
+      // Only the gateway leg needs shrinking; this is a wholly separate
+      // buffer from ptyd's own MAX_SOCKET_BACKLOG.
+      const bpWeb = launch('src/web/index.ts', {
+        ...bpSandbox.env,
+        PTYHUB_MAX_WS_BACKLOG: '4096',
+      });
+      await waitFor('bp gateway', () => /listening on/.test(bpWeb.logs()), 20000);
+
+      try {
+        const bpApi = new Client(bpOrigin);
+        const bpTokenFile = path.join(bpSandbox.env.XDG_STATE_HOME!, 'ptyhub', 'token.json');
+        await waitFor('bp access token', () => fs.existsSync(bpTokenFile), 10000);
+        const bpToken = JSON.parse(fs.readFileSync(bpTokenFile, 'utf8')).token as string;
+        await bpApi.post('/api/auth/pair', { k: bpToken });
+
+        const created = await bpApi.post('/api/sessions', { argv: ['/bin/sh'] });
+        if (created.status !== 201) {
+          throw new Error(
+            `bp session create failed: ${created.status} ${created.text}\n--- bp web log ---\n${bpWeb.logs()}`,
+          );
+        }
+        const bpId: string = created.json.session.id;
+
+        // A WebSocket that connects and subscribes, then is told to stop
+        // reading entirely — standing in for a phone that fell asleep mid
+        // stream. `ws`'s own frame parser normally keeps the socket draining
+        // regardless of app-level listeners, so simulating a truly stalled
+        // reader needs an explicit pause of the underlying transport.
+        // A WS `open` event only means the handshake finished; the gateway's
+        // own subscribe() to ptyd is a separate async step after that. Wait
+        // for its `ready` control frame so "both attached" below is not a race.
+        const waitReady = (socket: WebSocket) =>
+          new Promise<void>((resolve) => {
+            const onMsg = (data: WebSocket.RawData, isBinary: boolean) => {
+              if (isBinary) return;
+              if (JSON.parse(String(data)).t === 'ready') {
+                socket.off('message', onMsg);
+                resolve();
+              }
+            };
+            socket.on('message', onMsg);
+          });
+
+        const stuckWs = new WebSocket(`${bpOrigin.replace('http', 'ws')}/ws/sessions/${bpId}`, {
+          headers: { Origin: bpOrigin, Cookie: bpApi.cookieHeader },
+        });
+        await new Promise((resolve) => stuckWs.once('open', resolve));
+        await waitReady(stuckWs);
+        // Only pause once truly subscribed — pausing stops it from ever
+        // seeing its own `ready` frame.
+        stuckWs.pause();
+
+        const flooder = new WebSocket(`${bpOrigin.replace('http', 'ws')}/ws/sessions/${bpId}`, {
+          headers: { Origin: bpOrigin, Cookie: bpApi.cookieHeader },
+        });
+        await new Promise((resolve) => flooder.once('open', resolve));
+        await waitReady(flooder);
+
+        // Confirm both really are attached before flooding — otherwise a
+        // "drops to 1" check below would trivially pass even if the fix did
+        // nothing at all.
+        const beforeFlood = await bpApi.get(`/api/sessions/${bpId}`);
+        check(
+          'both sockets are attached before the flood',
+          beforeFlood.json.session.viewers === 2,
+          `viewers = ${beforeFlood.json.session.viewers}`,
+        );
+
+        // Loopback TCP buffers auto-tune generously, so a small burst is
+        // comfortably absorbed by the kernel without ever registering as
+        // backpressure at the ws layer — this needs to be big enough to
+        // overwhelm that, not just past the 4 KB application-level threshold.
+        flooder.send(Buffer.from('yes | head -c 100000000\n'), { binary: true });
+
+        // The property that matters: the gateway gives up on the stalled
+        // socket and ptyd is told to drop that subscription, promptly and on
+        // its own — not whether the frozen client ever notices, which (like
+        // the ptyd-level fix) it may not do until something wakes it up.
+        check(
+          'the gateway drops the stalled terminal socket viewer promptly',
+          await waitFor(
+            'viewer count to fall',
+            async () => {
+              const res = await bpApi.get(`/api/sessions/${bpId}`);
+              return res.json.session.viewers === 1; // just the flooder left
+            },
+            8000,
+          ),
+        );
+        check(
+          'the gateway logs why it disconnected the stalled socket',
+          bpWeb.logs().includes('not draining'),
+        );
+
+        flooder.close();
+        stuckWs.terminate();
+      } finally {
+        bpWeb.stop();
+        bpPtyd.stop();
+        await sleep(300);
+        bpSandbox.cleanup();
+      }
+    }
+
     // --- gateway restart does not disturb sessions --------------------------
 
     web.stop();

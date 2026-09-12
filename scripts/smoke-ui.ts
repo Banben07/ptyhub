@@ -488,6 +488,28 @@ async function main(): Promise<void> {
       })(),
     );
 
+    // Ctrl+W must do nothing: bash/readline/vim already use Ctrl+<key> for
+    // line editing (Ctrl+W deletes a word), so the direct layer only ever
+    // binds Cmd by default — auto-binding Ctrl too would fight the shell.
+    await leader(page, 'c');
+    await waitFor('a tab for the Ctrl check', async () => (await page.locator('.tab').count()) >= 1, 6000);
+    const tabsForCtrlCheck = await page.locator('.tab').count();
+    await page.click('.pane-slot');
+    await dispatchChord(page, { key: 'w', ctrl: true });
+    await sleep(400);
+    check(
+      'Ctrl+W does not close a terminal, only ⌘W does',
+      (await page.locator('.tab').count()) === tabsForCtrlCheck,
+    );
+    // Clean up the throwaway tab this check needed, via the UI itself since
+    // Ctrl+W correctly failed to do it.
+    await page.locator('.tab.active .tab-close').click();
+    await waitFor(
+      'back to the tab count before the Ctrl+W check',
+      async () => (await page.locator('.tab').count()) === tabsForCtrlCheck - 1,
+      4000,
+    );
+
     // ⌘1 / ⌘2 jump straight to a terminal by position, no leader required.
     await leader(page, 'c');
     await waitFor('second tab for switching', async () => (await page.locator('.tab').count()) === 2, 6000);

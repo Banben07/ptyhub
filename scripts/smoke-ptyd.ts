@@ -11,11 +11,13 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PtydClient, PtydError } from '../src/shared/ptyd-client.ts';
 import type { Event } from '../src/shared/protocol.ts';
+import { encodeJson } from '../src/shared/protocol.ts';
 // Shared with the other suites on purpose: a second copy of `waitFor` is how a
 // version that does not await async predicates crept back in.
 import { check, sleep, summary, waitFor } from './harness.ts';
@@ -241,6 +243,123 @@ async function main(): Promise<void> {
 
     client2.close();
     client3.close();
+
+    // --- a viewer that cannot keep up is disconnected, not silently desynced --
+    //
+    // Regression coverage for a real bug: the old behaviour just skipped
+    // output past a backlog threshold and kept the connection open as if
+    // nothing had happened. For a full-screen program that gap can never be
+    // recovered — the client's rendered screen permanently diverges from
+    // ptyd's own headless copy, with nothing in the protocol able to detect
+    // it. Disconnecting instead forces the client back through subscribe,
+    // which always replays a correct, complete snapshot.
+    {
+      const bpTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ptyhub-bp-'));
+      const bpEnv = {
+        ...process.env,
+        XDG_CONFIG_HOME: path.join(bpTmp, 'config'),
+        XDG_STATE_HOME: path.join(bpTmp, 'state'),
+        XDG_RUNTIME_DIR: path.join(bpTmp, 'run'),
+        // Shrunk so a small, fast burst of output triggers the same condition
+        // that would otherwise need megabytes of real, unread traffic.
+        PTYHUB_MAX_SOCKET_BACKLOG: '4096',
+      };
+      fs.mkdirSync(bpEnv.XDG_RUNTIME_DIR, { recursive: true });
+      const bpSocketFile = path.join(bpEnv.XDG_RUNTIME_DIR, 'ptyhub', 'ptyd.sock');
+
+      const bpPtyd = spawn(process.execPath, ['--import', 'tsx', 'src/ptyd/index.ts'], {
+        cwd: root,
+        env: bpEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let bpLog = '';
+      bpPtyd.stderr?.on('data', (c: Buffer) => {
+        bpLog += c.toString();
+      });
+
+      try {
+        await waitFor('backpressure ptyd socket', () => fs.existsSync(bpSocketFile), 20000);
+
+        const bpClient = await PtydClient.connect(bpSocketFile);
+        const bpSession = await bpClient.create({
+          name: 'bp-test',
+          argv: ['/bin/sh'],
+          cols: 80,
+          rows: 24,
+        });
+
+        // A second, independent viewer that subscribes but never reads a
+        // single byte back — standing in for a suspended phone or a wedged
+        // SSH tunnel. Deliberately raw `net.Socket`, no 'data' listener and no
+        // .resume(): it stays paused, so replies and PTY output pile up
+        // unread on ptyd's side of the connection.
+        const stuck = net.connect(bpSocketFile);
+        await new Promise<void>((resolve, reject) => {
+          stuck.once('connect', () => resolve());
+          stuck.once('error', reject);
+        });
+        stuck.write(
+          encodeJson({ t: 'req', rid: 1, op: 'subscribe', id: bpSession.id, snapshot: false }),
+        );
+
+        // Comfortably more than 4 KB, fast, from a single line of input.
+        bpClient.sendInput(bpSession.id, 'yes | head -c 2000000\n');
+
+        // The property that actually matters: ptyd forgets about a stalled
+        // subscriber promptly, on its own, regardless of whether that client
+        // ever notices. A socket that is truly never read from (as opposed to
+        // a real client, which always reads at least via its own control
+        // loop) can sit there indefinitely without locally observing the
+        // remote close — Node/the kernel do not surface it without an attempt
+        // to read or write — so the session's own viewer count is the
+        // reliable, deterministic signal, not the dead client's socket state.
+        check(
+          'ptyd drops the stalled viewer from the session promptly',
+          await waitFor(
+            'viewer count to fall',
+            async () => (await bpClient.get(bpSession.id)).viewers === 0,
+            5000,
+          ),
+        );
+        check('ptyd logs why it disconnected the stuck viewer', bpLog.includes('not draining'));
+
+        // The dead client does find out, the moment it tries to do anything
+        // with the connection — exactly what a real viewer's own control
+        // traffic (a resize, a ping) would trigger before long.
+        const wroteAfterDrop = await new Promise<boolean>((resolve) => {
+          stuck.write('probe-after-drop', (err) => resolve(!err));
+        });
+        check(
+          "the dead connection surfaces an error as soon as it's used again",
+          !wroteAfterDrop,
+        );
+
+        // The session itself, and a normal viewer, are unaffected by the
+        // other viewer's disconnection.
+        const output = { text: '' };
+        const healthy = await PtydClient.connect(bpSocketFile, {
+          onOutput: (_id, data) => {
+            output.text += data.toString('utf8');
+          },
+        });
+        await healthy.subscribe(bpSession.id, { snapshot: false });
+        healthy.sendInput(bpSession.id, '\x03'); // stop the `yes` flood first
+        await sleep(300);
+        healthy.sendInput(bpSession.id, 'echo still-alive\n');
+        check(
+          'the session and a well-behaved viewer are unaffected',
+          await waitFor('still-alive output', () => output.text.includes('still-alive'), 8000),
+        );
+
+        healthy.close();
+        bpClient.close();
+        stuck.destroy();
+      } finally {
+        bpPtyd.kill('SIGTERM');
+        await waitFor('backpressure ptyd exit', () => bpPtyd.exitCode !== null, 5000);
+        fs.rmSync(bpTmp, { recursive: true, force: true });
+      }
+    }
 
     // --- shutdown -----------------------------------------------------------
 

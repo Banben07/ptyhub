@@ -24,8 +24,11 @@ import type { AuthContext } from './http-util.ts';
 import { originAllowed } from './http-util.ts';
 import type { PtydControl } from './ptyd-control.ts';
 
-/** Stop buffering for a viewer that is not draining (asleep phone, dead tunnel). */
-const MAX_WS_BACKLOG = 4 * 1024 * 1024;
+/**
+ * Disconnect a viewer that is not draining (asleep phone, dead tunnel).
+ * Overridable so a test can shrink it and force the condition deterministically.
+ */
+const MAX_WS_BACKLOG = Number(process.env.PTYHUB_MAX_WS_BACKLOG) || 4 * 1024 * 1024;
 const HEARTBEAT_MS = 30_000;
 
 export interface WsDeps {
@@ -192,7 +195,23 @@ async function handleTerminal(
     client = await PtydClient.connect(socketFile, {
       onOutput: (_id, data) => {
         if (ws.readyState !== ws.OPEN) return;
-        if (ws.bufferedAmount > MAX_WS_BACKLOG) return;
+        // Silently skipping output here would be the same mistake ptyd itself
+        // avoids on the other leg of this pipe: a browser that cannot keep up
+        // would carry on believing it is in sync while missing bytes out of
+        // the middle of, say, vim's screen redraw, with no way for either side
+        // to notice or repair it. Closing forces exactly the reconnect path
+        // that already re-subscribes and replays a full, correct snapshot.
+        if (ws.bufferedAmount > MAX_WS_BACKLOG) {
+          log(`terminal socket for session ${sessionId} is not draining; closing it`);
+          // Not ws.close(): a graceful close sends a close frame down the very
+          // same congested pipe and waits for the peer's reply, so on a socket
+          // already this backed up it can sit half-closed for a long time
+          // instead of freeing anything promptly. terminate() drops the
+          // underlying connection immediately, no handshake — the same
+          // abrupt approach ptyd takes on its own side of this pipe.
+          ws.terminate();
+          return;
+        }
         ws.send(data, { binary: true });
       },
       onEvent: (evt) => {

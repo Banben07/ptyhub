@@ -569,11 +569,13 @@ function KeyboardSettings() {
       <h3 class="settings-subhead">Mac-style shortcuts</h3>
       <p class="settings-note">
         Fires straight on the combination shown, no leader needed — the shape of a
-        native Mac app (⌘W to close, ⌘1 to jump to a terminal, and so on). In a plain
-        browser tab, a few combinations are reserved by the browser itself (marked
-        below) and only reach the page in an installed app or an app-mode window
-        with no tab strip. Bound to both ⌘ and Ctrl, so it works with either as the
-        primary modifier.
+        native Mac app (⌘W to close, ⌘1 to jump to a terminal, and so on). Bound to
+        ⌘ only, never Ctrl: Ctrl+key is exactly what bash, readline and vim already
+        use for line editing (Ctrl+W deletes a word, Ctrl+K kills to end of line,
+        and more), so binding it here too would break ordinary shell editing the
+        moment this is turned on. In a plain browser tab, a few ⌘ combinations are
+        reserved by the browser itself (marked below) and only reach the page in an
+        installed app or an app-mode window with no tab strip.
       </p>
 
       <Field

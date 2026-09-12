@@ -14,13 +14,18 @@
  *
  * **Direct bindings** fire on a single modifier+key chord with no leader —
  * Cmd+W to close, Cmd+1 to jump to terminal 1, the shape of a native Mac app.
- * In an ordinary browser tab several of these (Cmd/Ctrl+W, +T, +N and their
- * Shift variants) are reserved by the browser itself and cannot be
- * intercepted by page JavaScript, by design, so users get trapped in an
- * unclosable tab. They work as intended in a window that does not have that
- * browser chrome to begin with — an installed PWA in standalone mode, or a
- * browser launched in app/kiosk mode — which is why this layer defaults to
- * off and is a deliberate opt-in for people running ptyhub that way.
+ * The shipped defaults use Cmd (`meta`) only, deliberately not Ctrl: Ctrl+key
+ * is exactly the space bash/readline and vim already use for line editing
+ * (Ctrl+W deletes a word, Ctrl+K kills to end of line, Ctrl+F/B/D and more),
+ * so binding it here by default would break ordinary shell editing the moment
+ * this layer is turned on. Cmd is never touched by any of that. In an ordinary
+ * browser tab several Cmd combos (+W, +T, +N and their Shift variants) are
+ * reserved by the browser itself and cannot be intercepted by page
+ * JavaScript, by design, so users get trapped in an unclosable tab. They work
+ * as intended in a window that does not have that browser chrome to begin
+ * with — an installed PWA in standalone mode, or a browser launched in
+ * app/kiosk mode — which is why this layer defaults to off and is a
+ * deliberate opt-in for people running ptyhub that way.
  *
  * The master switch turns off both layers at once, a safety valve for anyone
  * who just wants a plain page with no keystrokes intercepted at all.
@@ -102,7 +107,7 @@ export interface Chord {
 }
 
 /** Bumped when a stored keymap needs migrating; see `normalizeKeymap`. */
-export const KEYMAP_VERSION = 3;
+export const KEYMAP_VERSION = 4;
 
 /** The part that syncs across devices: what each key does. */
 export interface SharedKeymap {
@@ -260,9 +265,18 @@ export function directConflict(chord: Chord): string | null {
 }
 
 /**
- * Mac-idiom defaults for the direct layer, expressed once per logical combo
- * and instantiated under both Ctrl and Meta so the same set is reachable with
- * either the Mac or the Windows/Linux primary modifier.
+ * Mac-idiom defaults for the direct layer, bound under Cmd (`meta`) only —
+ * deliberately not also under Ctrl.
+ *
+ * Ctrl+key is exactly the space bash/readline and vim already use for line
+ * editing: Ctrl+W deletes the previous word while typing a command, Ctrl+K
+ * kills to end of line, Ctrl+F/B move forward/back a character, Ctrl+D is
+ * EOF. Auto-binding those as "direct shortcuts" the moment this layer is
+ * turned on would break ordinary shell editing. Cmd, by contrast, is never
+ * touched by any of that — no shell or readline binds it — which is exactly
+ * why it is the one modifier safe to hijack here. Anyone who wants a specific
+ * action on a Ctrl combo instead can still record one by hand below; it just
+ * is not force-installed for everyone.
  *
  * Chosen from existing, well-known conventions rather than invented: tab
  * lifecycle and navigation match iTerm2/Terminal.app (Cmd+T/W, Cmd+D and
@@ -297,16 +311,14 @@ const DIRECT_DEFAULTS: { key: string; shift?: boolean; action: ActionId }[] = [
 function buildDefaultDirectBindings(): Record<string, ActionId> {
   const out: Record<string, ActionId> = {};
   for (const entry of DIRECT_DEFAULTS) {
-    for (const primary of ['ctrl', 'meta'] as const) {
-      const id = chordId({
-        ctrl: primary === 'ctrl',
-        meta: primary === 'meta',
-        alt: false,
-        shift: entry.shift ?? false,
-        key: entry.key,
-      });
-      out[id] = entry.action;
-    }
+    const id = chordId({
+      ctrl: false,
+      meta: true,
+      alt: false,
+      shift: entry.shift ?? false,
+      key: entry.key,
+    });
+    out[id] = entry.action;
   }
   return out;
 }
@@ -415,6 +427,27 @@ export function normalizeSharedKeymap(input: unknown): SharedKeymap {
   for (const [id, action] of Object.entries(raw.directBindings ?? {})) {
     if (typeof id === 'string' && id.length > 0 && actionIds.has(String(action))) {
       directBindings[id] = action as ActionId;
+    }
+  }
+
+  // Migrate keymaps written while direct bindings still auto-registered under
+  // both Ctrl and Cmd. Ctrl+key is exactly what shell line editing already
+  // uses (Ctrl+W deletes a word, Ctrl+K kills to end of line, and more), so a
+  // Ctrl entry sitting alongside a Cmd entry for the very same action was
+  // never a deliberate choice — nothing in the UI can produce that pairing any
+  // other way, since recording a new chord for an action replaces every
+  // existing entry for it first. Keep the Cmd one, drop the Ctrl one.
+  if ((raw.version ?? 1) < 4) {
+    const actionsWithMeta = new Set(
+      Object.entries(directBindings)
+        .filter(([id]) => id.split('+').slice(0, -1).includes('meta'))
+        .map(([, action]) => action),
+    );
+    for (const [id, action] of Object.entries(directBindings)) {
+      const modifiers = id.split('+').slice(0, -1);
+      if (!modifiers.includes('meta') && actionsWithMeta.has(action)) {
+        delete directBindings[id];
+      }
     }
   }
 

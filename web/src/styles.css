@@ -807,11 +807,15 @@ body.dragging-tab {
   min-height: 0;
   overflow: hidden;
   background: var(--term-bg);
-  border: 1px solid transparent;
+  /* A single accent edge, the same visual language the sidebar's own divider
+     uses — not a box around the whole terminal, which is permanently visible
+     noise in the (most common) single-pane case, where "active" is always
+     true anyway. */
+  border-left: 2px solid transparent;
 }
 
 .pane.active {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  border-left-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .pane-slot,

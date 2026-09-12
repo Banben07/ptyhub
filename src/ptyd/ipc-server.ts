@@ -27,8 +27,12 @@ import { VERSION } from '../shared/version.ts';
 import type { Subscriber } from './session.ts';
 import { Registry, RegistryError } from './registry.ts';
 
-/** Drop output for a client that has stopped reading past this much backlog. */
-const MAX_SOCKET_BACKLOG = 8 * 1024 * 1024;
+/**
+ * Disconnect a viewer that has stopped reading past this much backlog.
+ * Overridable so a test can shrink it and force the condition deterministically
+ * without actually pushing megabytes through a real socket.
+ */
+const MAX_SOCKET_BACKLOG = Number(process.env.PTYHUB_MAX_SOCKET_BACKLOG) || 8 * 1024 * 1024;
 
 let nextKey = 1;
 
@@ -38,7 +42,6 @@ class Connection implements Subscriber {
   private readonly subscribed = new Set<string>();
   private readonly unlisten: () => void;
   private closed = false;
-  private droppingOutput = false;
 
   constructor(
     private readonly socket: net.Socket,
@@ -58,16 +61,22 @@ class Connection implements Subscriber {
   sendOut(sessionId: string, data: Buffer): void {
     if (this.closed) return;
     // A viewer that stalls (suspended phone, wedged tunnel) must not be able to
-    // grow ptyd's memory without bound. Skip output until it drains; the next
-    // snapshot on reattach will make it whole again.
+    // grow ptyd's memory without bound — but silently skipping output while
+    // pretending the connection is still healthy is worse than disconnecting
+    // it. This stream is arbitrary bytes mid-escape-sequence to a full-screen
+    // program (vim, htop, a TUI): drop a chunk in the middle of one and the
+    // client's rendered screen can permanently diverge from ptyd's own
+    // headless copy, with nothing in the protocol able to detect or repair it
+    // afterwards. So disconnect outright. Every caller's reconnect path
+    // already re-subscribes and replays a fresh snapshot on the way back in,
+    // which is the only correct recovery — a snapshot exists precisely for
+    // this, and a connection that kept dropping bytes while claiming to be
+    // fine would never use it.
     if (this.socket.writableLength > MAX_SOCKET_BACKLOG) {
-      if (!this.droppingOutput) {
-        this.droppingOutput = true;
-        this.log(`connection ${this.key} is not draining, dropping output`);
-      }
+      this.log(`connection ${this.key} is not draining; closing it rather than dropping output`);
+      this.socket.destroy();
       return;
     }
-    this.droppingOutput = false;
     this.socket.write(encodeData(FrameType.Out, sessionId, data));
   }
 

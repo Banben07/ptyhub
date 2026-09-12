@@ -4,7 +4,7 @@
  * is down, and the version running.
  */
 
-import { useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { runAction } from '../actions.ts';
 import {
   activeSessionId,
@@ -18,6 +18,29 @@ import { SearchIcon, SettingsIcon } from './icons.tsx';
 
 export function StatusPill() {
   const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Clicking anywhere outside the pill or its popover closes it, the way any
+  // other dropdown behaves — previously the only way out was clicking the
+  // pill a second time.
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', dismiss, true);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      window.removeEventListener('pointerdown', dismiss, true);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [open]);
 
   const ptyd = ptydStatus.value;
   const events = eventsConnected.value;
@@ -36,7 +59,7 @@ export function StatusPill() {
     : 'Connected';
 
   return (
-    <div class="status-area">
+    <div class="status-area" ref={containerRef}>
       <button class="icon-btn" title="Search in terminal" onClick={() => runAction('search')}>
         <SearchIcon />
       </button>
