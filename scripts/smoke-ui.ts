@@ -332,11 +332,110 @@ async function main(): Promise<void> {
     const settingsVisible = await page.locator('.settings').isVisible().catch(() => false);
     check('leader , opens settings', settingsVisible);
 
+    // --- scrollback: the newest output, and a reachable scrollbar ----------
+
+    // The settings check just above left the panel open; it covers the screen.
+    await page.keyboard.press('Escape');
+    await sleep(250);
+
+    await page.click('.pane-slot');
+    await page.keyboard.type('seq 1 300\n');
+    check(
+      'a long output produces scrollback',
+      await waitForText(page, '300', 10000),
+    );
+    await sleep(600);
+
+    const scrollInfo = async () =>
+      page.evaluate(() => {
+        const hub = (window as any).__ptyhub;
+        return hub.scroll(hub.active());
+      });
+
+    // The canvas must stop short of the scrollbar. xterm paints the screen over
+    // the viewport, so a grid sized to the full width hides the scrollbar
+    // completely and it cannot be dragged.
+    const geometry = await scrollInfo();
+    check(
+      'the terminal leaves room for its own scrollbar',
+      geometry.gutter > 0 &&
+        geometry.screenWidth <= geometry.viewportWidth - geometry.gutter + 1,
+      `screen ${geometry.screenWidth}px, viewport ${geometry.viewportWidth}px, ` +
+        `gutter ${geometry.gutter}px`,
+    );
+    // Whether that gutter holds a classic scrollbar or an overlay one is the
+    // browser's business — this headless Chromium gives every scroll container
+    // an overlay, even a plain div. The part that is ours, and the part that
+    // was broken, is that the canvas no longer covers it.
+
+    check('a fresh terminal sits at the newest output', (await scrollInfo()).atBottom);
+
+    // Switching away and back must not jump to the top of the scrollback:
+    // taking the node out of the DOM discards its scroll position.
+    await leader(page, 'c');
+    await waitFor('second tab', async () => (await page.locator('.tab').count()) === 2, 8000);
+    await sleep(500);
+    await page.locator('.tab').first().click();
+    await sleep(800);
+    const returned = await scrollInfo();
+    check(
+      'returning to a tab shows the newest output, not the top',
+      returned.atBottom,
+      JSON.stringify(returned),
+    );
+
+    // The root cause of the old jump: xterm's scroll position and the DOM
+    // element's scrollTop drifted apart while the node was detached, and only
+    // reconciled on the next wheel event.
+    check(
+      'the scroll position and the DOM scrollTop agree after returning',
+      Math.abs(returned.scrollTop - returned.expectedScrollTop) <= 2,
+      `scrollTop ${returned.scrollTop} vs expected ${returned.expectedScrollTop}`,
+    );
+
+    // And the symptom itself: one notch of the wheel must move by about one
+    // notch, not fling the view somewhere else.
+    const beforeWheel = await scrollInfo();
+    await page.mouse.move(700, 400);
+    await page.mouse.wheel(0, 120);
+    await sleep(400);
+    const afterWheel = await scrollInfo();
+    check(
+      'a wheel notch scrolls by a little, it does not jump',
+      Math.abs(afterWheel.viewportY - beforeWheel.viewportY) <= 6,
+      `viewportY ${beforeWheel.viewportY} -> ${afterWheel.viewportY}`,
+    );
+
+    // A deliberate scroll back should survive the same round trip.
+    await page.evaluate(() => {
+      const hub = (window as any).__ptyhub;
+      hub.terminal(hub.active()).term.scrollToLine(5);
+    });
+    await sleep(300);
+    await page.locator('.tab').last().click();
+    await sleep(500);
+    await page.locator('.tab').first().click();
+    await sleep(800);
+    const afterReturn = await scrollInfo();
+    check(
+      'a deliberate scroll position is kept across a tab switch',
+      afterReturn.viewportY === 5,
+      JSON.stringify(afterReturn),
+    );
+
+    // Back to the bottom for the rest of the run.
+    await page.evaluate(() => {
+      const hub = (window as any).__ptyhub;
+      hub.terminal(hub.active()).term.scrollToBottom();
+    });
+
     // --- lock, pin, and the tab menu ---------------------------------------
 
-    // Two tabs to work with, named so the assertions read clearly.
-    await leader(page, 'c');
-    await waitFor('two tabs', async () => (await page.locator('.tab').count()) === 2, 8000);
+    // The scrollback section above already opened a second tab to switch to.
+    check(
+      'two tabs are open for the tab-bar tests',
+      (await page.locator('.tab').count()) === 2,
+    );
 
     const first = await centerOf(page, '.tab');
     await page.mouse.click(first.x, first.y, { button: 'right' });
@@ -454,14 +553,16 @@ async function main(): Promise<void> {
       paneSessions.join(','),
     );
 
+    // Dragging a tab that was not on screen leaves the original pane alone —
+    // one terminal moved, so one thing changed.
     check(
-      'the pane it came from is left empty rather than silently refilled',
-      paneSessions[0] === 'empty',
+      'the pane that was already showing something keeps it',
+      paneSessions[0] === 'terminal',
       paneSessions.join(','),
     );
 
-    // Close that empty pane, keeping the terminal.
-    await page.locator('.pane-tool.danger').first().click();
+    // Collapse back to one pane for the rest of the run.
+    await page.locator('.pane-tool.danger').last().click();
     await waitFor('one pane', async () => (await page.locator('.pane').count()) === 1, 5000);
     await sleep(300);
 

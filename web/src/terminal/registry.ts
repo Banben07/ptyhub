@@ -93,4 +93,31 @@ export function readTerminalText(id: string): string {
     return term ? { cols: term.term.cols, rows: term.term.rows } : null;
   },
   state: (id: string) => terminals.get(id)?.state.value ?? null,
+  /** Viewport position and whether the scrollbar is actually reachable. */
+  scroll: (id: string) => {
+    const term = terminals.get(id);
+    if (!term) return null;
+    const buffer = term.term.buffer.active;
+    const viewport = term.host.querySelector('.xterm-viewport') as HTMLElement | null;
+    const screen = term.host.querySelector('.xterm-screen') as HTMLElement | null;
+    // xterm keeps its own idea of the scroll position (viewportY) and the DOM
+    // element keeps scrollTop. They must agree, or the next wheel event snaps
+    // the view to wherever the element happens to be.
+    const rowHeight = screen && term.term.rows > 0 ? screen.offsetHeight / term.term.rows : 0;
+    return {
+      viewportY: buffer.viewportY,
+      baseY: buffer.baseY,
+      atBottom: buffer.viewportY >= buffer.baseY,
+      scrollTop: viewport?.scrollTop ?? 0,
+      expectedScrollTop: buffer.viewportY * rowHeight,
+      rowHeight,
+      screenWidth: screen?.offsetWidth ?? 0,
+      viewportWidth: viewport?.offsetWidth ?? 0,
+      /** Non-zero means a real, always-visible scrollbar rather than an overlay. */
+      scrollbarTakesSpace: viewport ? viewport.offsetWidth - viewport.clientWidth : 0,
+      gutter: Number.parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--term-scrollbar'),
+      ),
+    };
+  },
 };

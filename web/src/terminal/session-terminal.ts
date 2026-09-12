@@ -73,6 +73,7 @@ export class SessionTerminal {
   private proposedRows = 0;
   private viewers = 1;
   private lastClaim = 0;
+  private savedScroll: { line: number; atBottom: boolean } | null = null;
   private options: TerminalOptionsSource;
 
   constructor(
@@ -170,10 +171,53 @@ export class SessionTerminal {
       this.connect();
     }
     this.scheduleMeasure();
+    this.restoreScroll();
   }
 
   unmount(): void {
+    // Taking the node out of the document discards the viewport's scroll
+    // position, so remember it. Without this, coming back to a tab lands you at
+    // the top of the scrollback instead of at the newest output.
+    const buffer = this.term.buffer.active;
+    this.savedScroll = {
+      line: buffer.viewportY,
+      atBottom: buffer.viewportY >= buffer.baseY,
+    };
     this.host.remove();
+  }
+
+  /**
+   * Put the viewport back where it was, or at the newest output.
+   *
+   * Re-attaching the node resets the scroll container's `scrollTop` to zero
+   * while xterm still believes it is wherever it was. Nothing reconciles the
+   * two until the next scroll event, which is why one notch of the wheel used
+   * to fling the view somewhere else.
+   *
+   * Simply asking for the position we want is not enough: if xterm already
+   * holds that position the call is a no-op and it never rewrites `scrollTop`.
+   * So move somewhere else first, forcing a genuine change that makes xterm
+   * synchronise the DOM, then move to where we actually want to be.
+   */
+  private restoreScroll(): void {
+    const saved = this.savedScroll;
+    // After a layout pass: the viewport has no scroll range until it is sized.
+    requestAnimationFrame(() => {
+      const buffer = this.term.buffer.active;
+      if (buffer.baseY === 0) return; // Nothing to scroll; scrollTop 0 is right.
+
+      const target =
+        !saved || saved.atBottom ? buffer.baseY : Math.min(saved.line, buffer.baseY);
+      this.forceScrollTo(target);
+    });
+  }
+
+  /** Move the view to `line` in a way that always rewrites the DOM scrollTop. */
+  private forceScrollTo(line: number): void {
+    const buffer = this.term.buffer.active;
+    if (buffer.baseY === 0) return;
+    this.term.scrollToLine(line === 0 ? buffer.baseY : 0);
+    this.term.scrollToLine(line);
   }
 
   focus(): void {
@@ -303,6 +347,10 @@ export class SessionTerminal {
       case 'ready':
         this.applyServerSize(msg.cols, msg.rows);
         this.scheduleMeasure();
+        // The snapshot has just replayed a screenful of scrollback; show the
+        // end of it, which is what the session actually looks like now.
+        this.savedScroll = null;
+        requestAnimationFrame(() => this.forceScrollTo(this.term.buffer.active.baseY));
         break;
 
       case 'resized':
@@ -386,6 +434,26 @@ export class SessionTerminal {
   }
 
   /**
+   * Width to keep clear on the right for the scrollbar.
+   *
+   * xterm paints `.xterm-screen` above `.xterm-viewport` — both are positioned
+   * and the screen comes later in the DOM — so a grid sized to the full width
+   * draws straight over the scrollbar and it can be neither seen nor grabbed.
+   *
+   * This cannot be measured from the element: on platforms with overlay
+   * scrollbars `offsetWidth - clientWidth` is zero even though the scrollbar is
+   * drawn, and it is still covered. So the gutter comes from the stylesheet,
+   * which is also what sets the scrollbar's width.
+   */
+  private scrollbarWidth(): number {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue(
+      '--term-scrollbar',
+    );
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : 14;
+  }
+
+  /**
    * Whether this viewer sets the session's window size.
    *
    * A phone in "scale" mode normally yields, so joining a session a laptop is
@@ -417,7 +485,7 @@ export class SessionTerminal {
     const cell = this.cellSize();
     if (!cell) return;
 
-    const availW = this.host.clientWidth - PADDING * 2;
+    const availW = this.host.clientWidth - PADDING * 2 - this.scrollbarWidth();
     const availH = this.host.clientHeight - PADDING * 2;
 
     // A pane that is hidden, detached, or still being laid out reports a size
@@ -452,7 +520,7 @@ export class SessionTerminal {
   private applyScale(): void {
     const cell = this.cellSize();
     if (!cell) return;
-    const naturalW = cell.w * this.term.cols + PADDING * 2;
+    const naturalW = cell.w * this.term.cols + PADDING * 2 + this.scrollbarWidth();
     const naturalH = cell.h * this.term.rows + PADDING * 2;
     const scale = Math.min(
       1,

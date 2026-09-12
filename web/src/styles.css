@@ -25,6 +25,9 @@
   --radius-sm: 7px;
   --topbar-h: 44px;
   --sidebar-w: 264px;
+  /* Gutter kept clear of terminal columns so the scrollbar is visible and
+     grabbable. Read back by session-terminal.ts, so the two cannot drift. */
+  --term-scrollbar: 14px;
 
   --ui-font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
     'Helvetica Neue', Arial, sans-serif;
@@ -823,13 +826,8 @@ body.dragging-tab {
  * which is far too thin to grab when you are trying to scroll back through
  * output — this is the one scrollbar in the app people actually drag.
  */
-.term-mount .xterm-viewport {
-  scrollbar-width: auto;
-  scrollbar-color: var(--text-muted) transparent;
-}
-
 .term-mount .xterm-viewport::-webkit-scrollbar {
-  width: 14px;
+  width: var(--term-scrollbar);
 }
 
 .term-mount .xterm-viewport::-webkit-scrollbar-thumb {
@@ -1658,12 +1656,15 @@ select,
   box-shadow: var(--shadow);
 }
 
-/* Scrollbars that belong to the theme rather than the operating system. */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
-}
-
+/*
+ * Scrollbars that belong to the theme rather than the operating system.
+ *
+ * The two styling mechanisms are mutually exclusive: as soon as `scrollbar-width`
+ * is set, Chromium ignores every `::-webkit-scrollbar` rule and falls back to an
+ * overlay scrollbar that fades out. So the standard properties are confined to
+ * browsers that have no `::-webkit-scrollbar` at all, which in practice means
+ * Firefox.
+ */
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -1674,6 +1675,17 @@ select,
   border-radius: 6px;
   border: 3px solid transparent;
   background-clip: content-box;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .term-mount .xterm-viewport {
+    scrollbar-color: var(--text-muted) transparent;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
