@@ -17,6 +17,7 @@ import {
   renameSession,
   renamingId,
   sessions,
+  setSessionLock,
   setSidebarOpen,
   sidebarOpen,
   isMobile,
@@ -126,7 +127,6 @@ function Tab({
       title={`${session.name}${proc ? ` — ${proc}` : ''}\n${session.cwd}`}
     >
       {isPinned(id) && <PinIcon size={11} class="tab-badge" />}
-      {session.locked && <LockIcon size={11} class="tab-badge lock" />}
 
       {renaming ? (
         <RenameField id={id} initial={session.name} />
@@ -139,11 +139,16 @@ function Tab({
 
       <button
         class="tab-close"
-        aria-label={session.locked ? 'Locked — unlock to close' : 'Close terminal'}
+        aria-label={session.locked ? 'Unlock terminal' : 'Close terminal'}
+        title={session.locked ? 'Locked — click to unlock' : undefined}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          void closeSession(id);
+          if (session.locked) {
+            void setSessionLock(id, false);
+          } else {
+            void closeSession(id);
+          }
         }}
       >
         {session.locked ? <LockIcon size={13} /> : <CloseIcon size={13} />}

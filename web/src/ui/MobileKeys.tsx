@@ -27,6 +27,7 @@ const ROW_ONE: KeyDef[] = [
   { label: '↓', send: '\x1b[B' },
   { label: '←', send: '\x1b[D' },
   { label: '→', send: '\x1b[C' },
+  { label: 'End', send: '\x1b[F' },
 ];
 
 const ROW_TWO: KeyDef[] = [

@@ -742,9 +742,9 @@ async function main(): Promise<void> {
 
     await page.locator('.menu-item', { hasText: 'Lock' }).first().click();
     check(
-      'the tab shows a lock badge once locked',
+      'the tab shows as locked once locked',
       await waitFor(
-        'lock badge',
+        'locked class',
         async () => (await page.locator('.tab.locked').count()) === 1,
         6000,
       ),
@@ -752,15 +752,17 @@ async function main(): Promise<void> {
 
     const beforeLockedClose = await page.locator('.tab').count();
     await page.locator('.tab.locked .tab-close').click();
-    await sleep(600);
+    await sleep(400);
     check(
-      'clicking close on a locked tab does nothing',
-      (await page.locator('.tab').count()) === beforeLockedClose,
+      'clicking the lock icon unlocks the tab instead of closing it',
+      (await page.locator('.tab').count()) === beforeLockedClose &&
+        (await page.locator('.tab.locked').count()) === 0,
     );
-    check(
-      'and it says why',
-      await page.locator('.toast.error').isVisible().catch(() => false),
-    );
+
+    // Re-lock it so the pin/unlock-via-menu checks below see a locked tab.
+    await page.mouse.click(first.x, first.y, { button: 'right' });
+    await page.locator('.menu-item', { hasText: 'Lock' }).first().click();
+    await waitFor('re-locked', async () => (await page.locator('.tab.locked').count()) === 1, 6000);
 
     await page.mouse.click(first.x, first.y, { button: 'right' });
     await page.locator('.menu-item', { hasText: 'Pin to front' }).first().click();

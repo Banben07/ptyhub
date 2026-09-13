@@ -276,10 +276,6 @@ code {
   color: var(--text-muted);
 }
 
-.tab-badge.lock {
-  color: var(--warning);
-}
-
 .tab.locked .tab-close {
   color: var(--warning);
   opacity: 1;
