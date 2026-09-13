@@ -35,7 +35,6 @@ export class Registry {
   private readonly listeners = new Set<(evt: Event) => void>();
   private procTimer: NodeJS.Timeout | null = null;
   private persistTimer: NodeJS.Timeout | null = null;
-  private nameCounter = 0;
 
   constructor(private readonly cfg: Config) {}
 
@@ -167,8 +166,7 @@ export class Registry {
   }
 
   private defaultName(): string {
-    this.nameCounter += 1;
-    return `term ${this.nameCounter}`;
+    return 'New term';
   }
 
   private resolveCwd(requested?: string): string {
