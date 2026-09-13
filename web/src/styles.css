@@ -193,7 +193,27 @@ code {
   min-width: 72px;
   max-width: 220px;
   cursor: pointer;
+  position: relative;
   transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+/* A faint divider in the gap between tabs, so a run of same-length tabs
+   doesn't blur together — but not next to the active tab, which already
+   reads as distinct via its own background and underline. */
+.tab:not(:last-of-type)::after {
+  content: '';
+  position: absolute;
+  right: -2.5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+}
+
+.tab.active::after,
+.tab:has(+ .tab.active)::after {
+  content: none;
 }
 
 .tab:hover {
