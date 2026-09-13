@@ -67,7 +67,32 @@ const initialPane = makeLeaf(null);
 export const layoutRoot = signal<LayoutNode>(initialPane);
 export const activePaneId = signal<string>(initialPane.id);
 export const deviceClass = signal<DeviceClass>('desktop');
-export const sidebarOpen = signal(true);
+
+const SIDEBAR_STORAGE_KEY = 'ptyhub.sidebarOpen';
+
+function loadSidebarOpen(): boolean {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    return raw === null ? true : raw === '1';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether the sidebar shows. Per-device like `local-shortcuts.ts` — a
+ * window's layout habit, not something worth carrying to your other devices.
+ */
+export const sidebarOpen = signal(loadSidebarOpen());
+
+export function setSidebarOpen(open: boolean): void {
+  sidebarOpen.value = open;
+  try {
+    localStorage.setItem(SIDEBAR_STORAGE_KEY, open ? '1' : '0');
+  } catch {
+    // Private-browsing quota or storage disabled; the in-memory signal still works.
+  }
+}
 export const paletteOpen = signal(false);
 export const settingsOpen = signal(false);
 export const searchOpen = signal(false);

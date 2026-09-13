@@ -17,10 +17,10 @@ import {
   renameSession,
   renamingId,
   sessions,
+  setSidebarOpen,
   sidebarOpen,
   isMobile,
 } from '../state.ts';
-import { peekTerminal } from '../terminal/registry.ts';
 import { CloseIcon, LockIcon, PinIcon, PlusIcon, SidebarIcon } from './icons.tsx';
 import { TabMenu, type TabMenuTarget } from './TabMenu.tsx';
 
@@ -40,7 +40,7 @@ export function TabBar() {
           class="icon-btn"
           title="Toggle sidebar"
           aria-label="Toggle sidebar"
-          onClick={() => (sidebarOpen.value = !sidebarOpen.value)}
+          onClick={() => setSidebarOpen(!sidebarOpen.value)}
         >
           <SidebarIcon />
         </button>
@@ -54,16 +54,16 @@ export function TabBar() {
           </>
         ))}
         {insertAt === orderedSessions.value.length && <span class="tab-insert" />}
-      </div>
 
-      <button
-        class="icon-btn"
-        title="New terminal"
-        aria-label="New terminal"
-        onClick={() => runAction('new-session')}
-      >
-        <PlusIcon />
-      </button>
+        <button
+          class="icon-btn"
+          title="New terminal"
+          aria-label="New terminal"
+          onClick={() => runAction('new-session')}
+        >
+          <PlusIcon />
+        </button>
+      </div>
 
       {menu && <TabMenu target={menu} onClose={() => setMenu(null)} />}
     </div>
@@ -78,7 +78,6 @@ function Tab({
   onMenu: (target: TabMenuTarget) => void;
 }) {
   const session = sessions.value.find((s) => s.id === id);
-  const term = peekTerminal(id);
   const active = activeSessionId.value === id;
   const renaming = renamingId.value === id;
   const beingDragged = drag.value?.sessionId === id;
@@ -86,7 +85,6 @@ function Tab({
   if (!session) return null;
 
   const proc = BORING.has(session.fgProc) ? null : session.fgProc;
-  const unread = !active && term?.unread.value === true;
 
   const openMenu = (x: number, y: number) => onMenu({ sessionId: id, x, y });
 
@@ -127,7 +125,6 @@ function Tab({
       }}
       title={`${session.name}${proc ? ` — ${proc}` : ''}\n${session.cwd}`}
     >
-      {unread && <span class="dot" aria-label="new output" />}
       {isPinned(id) && <PinIcon size={11} class="tab-badge" />}
       {session.locked && <LockIcon size={11} class="tab-badge lock" />}
 
@@ -136,7 +133,6 @@ function Tab({
       ) : (
         <>
           <span class="tab-name">{session.name}</span>
-          {proc && <span class="tab-proc">{proc}</span>}
           {!session.alive && <span class="tab-proc dim">exited</span>}
         </>
       )}

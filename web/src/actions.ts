@@ -21,6 +21,7 @@ import {
   selectSessionByIndex,
   settingsOpen,
   setFontSize,
+  setSidebarOpen,
   sidebarOpen,
   splitActive,
 } from './state.ts';
@@ -80,7 +81,7 @@ export function runAction(action: ActionId): void {
       return;
 
     case 'toggle-sidebar':
-      sidebarOpen.value = !sidebarOpen.value;
+      setSidebarOpen(!sidebarOpen.value);
       return;
 
     case 'font-bigger':

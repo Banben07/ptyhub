@@ -929,6 +929,23 @@ async function main(): Promise<void> {
     );
     check('the chosen theme survives a reload', baseAfterReload === '#16161e');
 
+    // --- sidebar visibility is per-device, and survives a reload -----------
+
+    await page.click('[aria-label="Toggle sidebar"]');
+    await sleep(150);
+    check('hiding the sidebar removes it from the page', (await page.locator('.sidebar').count()) === 0);
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.xterm-screen', { timeout: 20000 });
+    check(
+      'the sidebar stays hidden after a reload',
+      (await page.locator('.sidebar').count()) === 0,
+    );
+
+    await page.click('[aria-label="Toggle sidebar"]');
+    await sleep(150);
+    check('toggling it back on restores the sidebar', (await page.locator('.sidebar').count()) === 1);
+
     await page.screenshot({ path: path.join(SHOT_DIR, 'desktop.png') });
 
     // --- gateway restart, from the browser's point of view -----------------

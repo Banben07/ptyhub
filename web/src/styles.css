@@ -160,7 +160,14 @@ code {
   overflow-x: auto;
   scrollbar-width: none;
   min-width: 0;
-  flex: 1;
+  /*
+   * Fills the rest of `.tabbar`, but the "+" button lives inside this
+   * container as its last flex child (see TabBar.tsx) rather than beside it,
+   * so it still sits right after the last tab — the tabs themselves have
+   * flex-grow: 0 and stop at their own width, leaving any leftover space
+   * after the button instead of stretching tabs or `.tabs` visibly wider.
+   */
+  flex: 1 1 auto;
   padding: 0 2px;
 }
 
@@ -179,6 +186,11 @@ code {
   background: transparent;
   color: var(--text-muted);
   white-space: nowrap;
+  /* Default width targets ~12 characters (~7px/char at this font) plus the
+     tab's own padding and close button, so a short name like "term 1" gets a
+     bit of breathing room without ballooning to sentence-length. */
+  flex: 0 1 132px;
+  min-width: 72px;
   max-width: 220px;
   cursor: pointer;
   transition: background 120ms var(--ease), color 120ms var(--ease);
@@ -205,6 +217,10 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
+  /* Takes the slack in a tab wider than its text, so the close/lock button
+     lands at the tab's right edge instead of hugging the name. */
+  flex: 1;
+  min-width: 0;
 }
 
 .tab-proc {
@@ -807,15 +823,6 @@ body.dragging-tab {
   min-height: 0;
   overflow: hidden;
   background: var(--term-bg);
-  /* A single accent edge, the same visual language the sidebar's own divider
-     uses — not a box around the whole terminal, which is permanently visible
-     noise in the (most common) single-pane case, where "active" is always
-     true anyway. */
-  border-left: 2px solid transparent;
-}
-
-.pane.active {
-  border-left-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .pane-slot,
