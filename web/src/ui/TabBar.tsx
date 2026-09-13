@@ -13,6 +13,7 @@ import {
   closeSession,
   focusSession,
   isPinned,
+  mobileSwitcherOpen,
   orderedSessions,
   renameSession,
   renamingId,
@@ -42,6 +43,17 @@ export function TabBar() {
           title="Toggle sidebar"
           aria-label="Toggle sidebar"
           onClick={() => setSidebarOpen(!sidebarOpen.value)}
+        >
+          <SidebarIcon />
+        </button>
+      )}
+
+      {isMobile.value && (
+        <button
+          class={`icon-btn${mobileSwitcherOpen.value ? ' on' : ''}`}
+          title="Switch terminal"
+          aria-label="Switch terminal"
+          onClick={() => (mobileSwitcherOpen.value = !mobileSwitcherOpen.value)}
         >
           <SidebarIcon />
         </button>

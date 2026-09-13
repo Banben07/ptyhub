@@ -11,6 +11,7 @@ import {
   flushPrefs,
   isMobile,
   leaderArmed,
+  mobileSwitcherOpen,
   paletteOpen,
   prefs,
   ptydStatus,
@@ -132,6 +133,7 @@ export function App() {
       </header>
 
       {!isMobile.value && sidebarOpen.value && <Sidebar />}
+      {isMobile.value && mobileSwitcherOpen.value && <Sidebar />}
 
       <main class="workspace">
         <PaneTree />

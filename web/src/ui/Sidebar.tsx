@@ -3,12 +3,15 @@
  * it is running, and how long it has been alive.
  */
 
+import { useEffect } from 'preact/hooks';
 import { runAction } from '../actions.ts';
 import {
   activeSessionId,
   closeSession,
   focusSession,
+  isMobile,
   isPinned,
+  mobileSwitcherOpen,
   orderedSessions,
   renamingId,
   setSessionLock,
@@ -45,8 +48,26 @@ function shortenPath(cwd: string): string {
 }
 
 export function Sidebar() {
+  const overlay = isMobile.value;
+
+  useEffect(() => {
+    if (!overlay) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        mobileSwitcherOpen.value = false;
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [overlay]);
+
   return (
-    <aside class="sidebar">
+    <>
+      {overlay && (
+        <div class="mobile-switcher-backdrop" onClick={() => (mobileSwitcherOpen.value = false)} />
+      )}
+      <aside class={`sidebar${overlay ? ' mobile-overlay' : ''}`}>
       <div class="sidebar-head">
         <span class="sidebar-title">Terminals</span>
         <div class="sidebar-head-actions">
@@ -77,7 +98,10 @@ export function Sidebar() {
             <div
               key={session.id}
               class={`session-row${active ? ' active' : ''}${session.alive ? '' : ' dead'}`}
-              onClick={() => focusSession(session.id)}
+              onClick={() => {
+                focusSession(session.id);
+                if (overlay) mobileSwitcherOpen.value = false;
+              }}
             >
               <div class="session-main">
                 {isPinned(session.id) && <PinIcon size={11} class="tab-badge" />}
@@ -132,6 +156,7 @@ export function Sidebar() {
           );
         })}
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

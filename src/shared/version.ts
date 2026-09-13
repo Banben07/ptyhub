@@ -1,2 +1,2 @@
 /** Single source of the version string, importable from any process. */
-export const VERSION = '0.5.10';
+export const VERSION = '0.5.11';

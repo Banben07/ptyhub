@@ -96,6 +96,8 @@ export function setSidebarOpen(open: boolean): void {
 export const paletteOpen = signal(false);
 export const settingsOpen = signal(false);
 export const searchOpen = signal(false);
+/** The session-switcher overlay on phones, where the tab strip only fits one at a time. */
+export const mobileSwitcherOpen = signal(false);
 export const renamingId = signal<string | null>(null);
 export const toast = signal<{ text: string; kind: 'info' | 'error' } | null>(null);
 export const bootError = signal<string | null>(null);

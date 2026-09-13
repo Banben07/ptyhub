@@ -1087,8 +1087,19 @@ async function main(): Promise<void> {
 
     // The End key is a local scroll-to-bottom, not a byte sent to the shell —
     // needs real scrollback to scroll away from, then confirm it snaps back.
-    await phonePage.keyboard.type('seq 1 200\n');
-    await waitForText(phonePage, '200');
+    await phonePage.keyboard.type('seq 1 200; echo scroll-test-done\n');
+    await waitForText(phonePage, 'scroll-test-done');
+    // The snapshot round-trip after heavy output can briefly reset the buffer,
+    // so wait for real scrollback to actually land before scrolling away from it.
+    await waitFor(
+      'phone scrollback to build up',
+      async () =>
+        (await phonePage.evaluate(() => {
+          const hub = (window as any).__ptyhub;
+          return hub.scroll(hub.active())?.baseY;
+        })) > 0,
+      5000,
+    );
     await phonePage.evaluate(() => {
       const hub = (window as any).__ptyhub;
       hub.terminal(hub.active()).term.scrollToTop();
@@ -1113,6 +1124,50 @@ async function main(): Promise<void> {
       3000,
     );
     check('the End key on the mobile bar scrolls back to the bottom', backAtBottom);
+
+    // --- mobile session switcher --------------------------------------------
+
+    const beforeNewTab = await phonePage.locator('.tab').count();
+    await phonePage.click('[aria-label="New terminal"]');
+    await waitFor(
+      'phone tab count to grow',
+      async () => (await phonePage.locator('.tab').count()) > beforeNewTab,
+      4000,
+    );
+    const switcherBtn = phonePage.locator('[aria-label="Switch terminal"]');
+    await switcherBtn.click();
+    const rowCount = await waitFor(
+      'switcher open',
+      async () => (await phonePage.locator('.sidebar.mobile-overlay .session-row').count()) === beforeNewTab + 1,
+      3000,
+    );
+    check(
+      'the switcher opens and lists every session',
+      rowCount,
+      `${await phonePage.locator('.sidebar.mobile-overlay .session-row').count()} rows, expected ${beforeNewTab + 1}`,
+    );
+
+    const firstRow = phonePage.locator('.sidebar.mobile-overlay .session-row').first();
+    await firstRow.click();
+    check(
+      'picking a session in the switcher closes it',
+      await waitFor(
+        'switcher closed',
+        async () => (await phonePage.locator('.mobile-switcher-backdrop').count()) === 0,
+        3000,
+      ),
+    );
+
+    await switcherBtn.click();
+    await phonePage.locator('.mobile-switcher-backdrop').click({ position: { x: 5, y: 5 } });
+    check(
+      'tapping outside the switcher closes it too',
+      await waitFor(
+        'switcher closed again',
+        async () => (await phonePage.locator('.mobile-switcher-backdrop').count()) === 0,
+        3000,
+      ),
+    );
 
     await phonePage.locator('.vkey:has-text("Esc")').click();
     await phonePage.screenshot({ path: path.join(SHOT_DIR, 'mobile.png') });

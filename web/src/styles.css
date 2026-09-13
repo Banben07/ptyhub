@@ -610,6 +610,30 @@ body.dragging-tab {
   border-right: 1px solid var(--border);
 }
 
+/*
+ * On a phone the tab strip only ever shows one tab at a time, so this same
+ * session list doubles as a full-screen switcher instead — opened from a
+ * button in the tab bar, closed by picking a session, tapping the backdrop,
+ * or Escape.
+ */
+.mobile-switcher-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 40;
+}
+
+.sidebar.mobile-overlay {
+  position: fixed;
+  top: var(--topbar-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  border-right: none;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+}
+
 .sidebar-head {
   display: flex;
   align-items: center;
