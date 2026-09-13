@@ -16,6 +16,8 @@ interface KeyDef {
   send?: string;
   letter?: string;
   wide?: boolean;
+  /** A local UI action instead of bytes sent to the shell. */
+  action?: 'scroll-to-bottom';
 }
 
 const ROW_ONE: KeyDef[] = [
@@ -27,7 +29,7 @@ const ROW_ONE: KeyDef[] = [
   { label: '↓', send: '\x1b[B' },
   { label: '←', send: '\x1b[D' },
   { label: '→', send: '\x1b[C' },
-  { label: 'End', send: '\x1b[F' },
+  { label: 'End', action: 'scroll-to-bottom' },
 ];
 
 const ROW_TWO: KeyDef[] = [
@@ -67,6 +69,12 @@ export function MobileKeys() {
     if (key.letter) {
       // Explicit control keys like ^C ignore the latches.
       send(String.fromCharCode(key.letter.toUpperCase().charCodeAt(0) - 64));
+      return;
+    }
+
+    if (key.action === 'scroll-to-bottom') {
+      const id = activeSessionId.value;
+      if (id) peekTerminal(id)?.term.scrollToBottom();
       return;
     }
 

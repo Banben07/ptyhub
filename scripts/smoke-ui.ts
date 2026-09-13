@@ -1085,6 +1085,35 @@ async function main(): Promise<void> {
       await waitForText(phonePage, 'phone-hello'),
     );
 
+    // The End key is a local scroll-to-bottom, not a byte sent to the shell —
+    // needs real scrollback to scroll away from, then confirm it snaps back.
+    await phonePage.keyboard.type('seq 1 200\n');
+    await waitForText(phonePage, '200');
+    await phonePage.evaluate(() => {
+      const hub = (window as any).__ptyhub;
+      hub.terminal(hub.active()).term.scrollToTop();
+    });
+    const phoneScrollInfo = await phonePage.evaluate(() => {
+      const hub = (window as any).__ptyhub;
+      return hub.scroll(hub.active());
+    });
+    check(
+      'scrolling up leaves the phone view off the bottom',
+      phoneScrollInfo?.atBottom === false,
+      JSON.stringify(phoneScrollInfo),
+    );
+    await phonePage.locator('.vkey:has-text("End")').click();
+    const backAtBottom = await waitFor(
+      'phone view back at bottom',
+      async () =>
+        (await phonePage.evaluate(() => {
+          const hub = (window as any).__ptyhub;
+          return hub.scroll(hub.active())?.atBottom;
+        })) === true,
+      3000,
+    );
+    check('the End key on the mobile bar scrolls back to the bottom', backAtBottom);
+
     await phonePage.locator('.vkey:has-text("Esc")').click();
     await phonePage.screenshot({ path: path.join(SHOT_DIR, 'mobile.png') });
     web3.stop();
