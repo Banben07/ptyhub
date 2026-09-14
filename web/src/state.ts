@@ -93,6 +93,7 @@ export function setSidebarOpen(open: boolean): void {
     // Private-browsing quota or storage disabled; the in-memory signal still works.
   }
 }
+
 export const paletteOpen = signal(false);
 export const settingsOpen = signal(false);
 export const searchOpen = signal(false);

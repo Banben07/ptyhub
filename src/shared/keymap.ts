@@ -69,7 +69,8 @@ export type ActionId =
   | 'font-bigger'
   | 'font-smaller'
   | 'font-reset'
-  | 'clear-screen';
+  | 'clear-screen'
+  | 'insert-newline';
 
 export interface ActionInfo {
   id: ActionId;
@@ -95,6 +96,7 @@ export const actions: ActionInfo[] = [
   { id: 'font-smaller', label: 'Decrease font size', group: 'View' },
   { id: 'font-reset', label: 'Reset font size', group: 'View' },
   { id: 'clear-screen', label: 'Clear screen', group: 'View' },
+  { id: 'insert-newline', label: 'Insert newline without submitting', group: 'View' },
 ];
 
 export interface Chord {
@@ -107,7 +109,7 @@ export interface Chord {
 }
 
 /** Bumped when a stored keymap needs migrating; see `normalizeKeymap`. */
-export const KEYMAP_VERSION = 4;
+export const KEYMAP_VERSION = 5;
 
 /** The part that syncs across devices: what each key does. */
 export interface SharedKeymap {
@@ -297,6 +299,11 @@ const DIRECT_DEFAULTS: { key: string; shift?: boolean; action: ActionId }[] = [
   { key: 'p', shift: true, action: 'command-palette' },
   { key: 'b', action: 'toggle-sidebar' },
   { key: 'k', action: 'clear-screen' },
+  // Cmd+J because Ctrl+J is spoken for: it is the one byte (raw LF) some
+  // full-screen programs — Claude Code included — read directly as "insert a
+  // newline without submitting", so it has to keep sending that literal byte
+  // rather than being redefined into an app-level shortcut.
+  { key: 'j', action: 'insert-newline' },
   { key: '=', action: 'font-bigger' },
   { key: '+', action: 'font-bigger' },
   { key: '-', action: 'font-smaller' },
@@ -449,6 +456,13 @@ export function normalizeSharedKeymap(input: unknown): SharedKeymap {
         delete directBindings[id];
       }
     }
+  }
+
+  // New default: Cmd+J for "insert newline without submitting". Add it to a
+  // keymap that predates it, but only if the user has not already claimed
+  // meta+j for something else themselves.
+  if ((raw.version ?? 1) < 5 && !('meta+j' in directBindings)) {
+    directBindings['meta+j'] = 'insert-newline';
   }
 
   let resolvedLeader = normalizeChord(raw.leader, defaultSharedKeymap.leader);

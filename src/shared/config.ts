@@ -84,6 +84,11 @@ export interface Config {
   trustedNetwork: boolean;
   /** Extra origins allowed for WebSocket upgrades, e.g. a reverse proxy host. */
   allowedOrigins: string[];
+  /** Keep this many default shells pre-spawned so "New terminal" is instant. */
+  warmPoolSize: number;
+  warmPoolEnabled: boolean;
+  /** Respawn a pooled shell that has sat idle this long, so it never hands out a stale environment. */
+  warmPoolMaxIdleMs: number;
 }
 
 export const defaultConfig: Config = {
@@ -103,6 +108,9 @@ export const defaultConfig: Config = {
   socketPath: null,
   trustedNetwork: false,
   allowedOrigins: [],
+  warmPoolSize: 4,
+  warmPoolEnabled: true,
+  warmPoolMaxIdleMs: 5 * 60 * 1000,
 };
 
 export function resolveShell(cfg: Config): { file: string; args: string[] } {

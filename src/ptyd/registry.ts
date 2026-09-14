@@ -30,11 +30,25 @@ export class RegistryError extends Error {
   }
 }
 
+/** A pre-spawned shell, parked outside the session table until claimed. */
+interface WarmShell {
+  session: Session;
+  bornAt: number;
+}
+
 export class Registry {
   private readonly sessions = new Map<string, Session>();
   private readonly listeners = new Set<(evt: Event) => void>();
   private procTimer: NodeJS.Timeout | null = null;
   private persistTimer: NodeJS.Timeout | null = null;
+  /**
+   * Shells spawned ahead of demand so "New terminal" can hand one over
+   * instead of paying for `spawn` + shell rc startup on every click. Not in
+   * `sessions`, not broadcast, not visible to any client until `create()`
+   * claims one — as far as the rest of ptyd is concerned these do not exist
+   * yet.
+   */
+  private readonly warmPool: WarmShell[] = [];
 
   constructor(private readonly cfg: Config) {}
 
@@ -42,7 +56,11 @@ export class Registry {
     // A previous ptyd's sessions died with it. Start from a clean file rather
     // than resurrecting metadata for shells that no longer exist.
     this.persistNow();
-    this.procTimer = setInterval(() => this.pollForeground(), this.cfg.procPollMs);
+    this.procTimer = setInterval(() => {
+      this.pollForeground();
+      this.sweepPool();
+    }, this.cfg.procPollMs);
+    this.fillPool();
   }
 
   stop(): void {
@@ -52,6 +70,7 @@ export class Registry {
     this.persistTimer = null;
     for (const session of this.sessions.values()) session.dispose();
     this.sessions.clear();
+    for (const warm of this.warmPool.splice(0)) warm.session.dispose();
     this.persistNow();
   }
 
@@ -106,6 +125,14 @@ export class Registry {
   // -------------------------------------------------------------------------
 
   create(opts: CreateOptions = {}): Session {
+    // A pooled shell was spawned with the default shell, home directory and
+    // plain environment, so only a request asking for exactly that can claim
+    // one — anything more specific (a custom command, cwd or env) still pays
+    // for a fresh spawn.
+    const poolable =
+      this.cfg.warmPoolEnabled && !opts.argv && !opts.cwd && !opts.env && this.warmPool.length > 0;
+    if (poolable) return this.claimWarm(opts);
+
     const id = this.freshId();
     const cwd = this.resolveCwd(opts.cwd);
 
@@ -143,6 +170,18 @@ export class Registry {
     return session;
   }
 
+  private claimWarm(opts: CreateOptions): Session {
+    const { session } = this.warmPool.shift()!;
+    if (opts.name?.trim()) session.rename(opts.name.trim());
+    session.setEmitter((evt) => this.broadcast(evt));
+    this.sessions.set(session.id, session);
+    session.refreshProc();
+    this.broadcast({ t: 'evt', ev: 'created', session: session.meta });
+    // Top up in the background; the caller already has its session.
+    this.fillPool();
+    return session;
+  }
+
   /** Dispose the session and drop it from the table. */
   remove(id: string): boolean {
     const session = this.sessions.get(id);
@@ -160,13 +199,53 @@ export class Registry {
   private freshId(): string {
     for (let attempt = 0; attempt < 32; attempt++) {
       const id = newSessionId((n) => crypto.randomBytes(n));
-      if (!this.sessions.has(id)) return id;
+      if (!this.sessions.has(id) && !this.warmPool.some((w) => w.session.id === id)) return id;
     }
     throw new RegistryError('id_exhausted', 'could not allocate a session id');
   }
 
   private defaultName(): string {
     return 'New term';
+  }
+
+  private spawnWarm(): Session {
+    const shell = resolveShell(this.cfg);
+    return new Session({
+      id: this.freshId(),
+      name: this.defaultName(),
+      cwd: this.resolveCwd(undefined),
+      file: shell.file,
+      args: shell.args,
+      env: this.buildEnv(undefined),
+      cols: clampCols(this.cfg.defaultCols),
+      rows: clampRows(this.cfg.defaultRows),
+      scrollback: this.cfg.scrollback,
+      snapshotScrollback: this.cfg.snapshotScrollback,
+      rawBufferBytes: this.cfg.rawBufferBytes,
+      reviveScreen: this.cfg.reviveScreen,
+      resizePolicy: this.cfg.resizePolicy,
+    });
+  }
+
+  private fillPool(): void {
+    if (!this.cfg.warmPoolEnabled) return;
+    while (this.warmPool.length < this.cfg.warmPoolSize) {
+      this.warmPool.push({ session: this.spawnWarm(), bornAt: Date.now() });
+    }
+  }
+
+  /** Respawn any pooled shell that has sat unclaimed long enough to risk a stale environment. */
+  private sweepPool(): void {
+    if (this.warmPool.length === 0) return;
+    const cutoff = Date.now() - this.cfg.warmPoolMaxIdleMs;
+    const stale = this.warmPool.filter((w) => w.bornAt < cutoff);
+    if (stale.length === 0) return;
+    for (const warm of stale) {
+      const idx = this.warmPool.indexOf(warm);
+      if (idx !== -1) this.warmPool.splice(idx, 1);
+      warm.session.dispose();
+    }
+    this.fillPool();
   }
 
   private resolveCwd(requested?: string): string {

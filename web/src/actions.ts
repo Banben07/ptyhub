@@ -106,6 +106,17 @@ export function runAction(action: ActionId): void {
       return;
     }
 
+    case 'insert-newline': {
+      const id = activeSessionId.value;
+      if (!id) return;
+      // The same raw LF byte Ctrl+J sends — bash/zsh treat it as accept-line,
+      // same as Enter, but full-screen programs like Claude Code read it as
+      // "newline, do not submit" instead. Cmd+J exists so that meaning is
+      // reachable without touching the Ctrl+J byte those programs depend on.
+      peekTerminal(id)?.paste('\n');
+      return;
+    }
+
     default: {
       const index = /^select-session-(\d)$/.exec(action);
       if (index) selectSessionByIndex(Number(index[1]) - 1);

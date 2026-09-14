@@ -922,6 +922,51 @@ async function main(): Promise<void> {
       await sleep(200);
     }
 
+    // --- Cmd+J inserts a newline without submitting, Ctrl+J stays untouched
+
+    // Ctrl+J must still submit on its own: it is the raw LF byte some
+    // full-screen programs (Claude Code's own newline shortcut, for one)
+    // read directly, and nothing in this app should ever intercept it.
+    await page.click('.pane-slot');
+    await sleep(200);
+    await page.keyboard.type('expr 6000 + 1');
+    await page.keyboard.press('Control+j');
+    check(
+      'Ctrl+J still submits the line normally, untouched by anything',
+      await waitForText(page, '6001', 4000),
+    );
+
+    // Turn the Mac-style direct layer on so Cmd+J is live.
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await page.locator('.setting:has-text("Enable Mac-style shortcuts") .toggle').click();
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
+    // In a plain shell Cmd+J's byte behaves exactly like Ctrl+J's (bash/zsh
+    // read LF the same as accept-line) — the point of Cmd+J is not a
+    // different effect, it is a second way to deliver that same byte when
+    // Ctrl+J itself cannot reach the page (e.g. a browser that reserves it).
+    // A program that treats LF differently from CR, like Claude Code, is
+    // what actually tells the two apart; a bare shell cannot.
+    await page.click('.pane-slot');
+    await sleep(200);
+    await page.keyboard.type('expr 7000 + 2');
+    await dispatchChord(page, { key: 'j', meta: true });
+    check(
+      'Cmd+J delivers the same byte Ctrl+J does',
+      await waitForText(page, '7002', 4000),
+    );
+
+    // Turn the direct layer back off so it does not leak into later assertions.
+    await page.click('button[title="Settings"]');
+    await sleep(200);
+    await page.click('.settings-tab:has-text("Keyboard")');
+    await page.locator('.setting:has-text("Enable Mac-style shortcuts") .toggle').click();
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
     // --- preferences persist across a reload -------------------------------
 
     await page.reload({ waitUntil: 'domcontentloaded' });
