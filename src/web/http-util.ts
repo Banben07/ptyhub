@@ -13,6 +13,11 @@ export interface AuthContext {
   user: string | null;
   /** Opaque id of the device credential used, if any. */
   deviceId: string | null;
+  /**
+   * The browser presented the secret we rotated away from, because the new
+   * one has not reached it yet. The next response must hand it out again.
+   */
+  staleSecret?: boolean;
 }
 
 export interface Ctx {

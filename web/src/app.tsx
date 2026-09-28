@@ -25,6 +25,7 @@ import {
 } from './state.ts';
 import { applyNerdFont, applyThemeToDocument } from './theme.ts';
 import {
+  claimSizeAll,
   nudgeAll,
   peekTerminal,
   refreshGlyphsInAll,
@@ -59,9 +60,15 @@ export function App() {
       if (document.visibilityState !== 'visible') return;
       nudgeEventStream();
       nudgeAll();
+      claimSizeAll();
     };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('online', onVisible);
+
+    // A hidden or unfocused page never proposes a size (see `inUse` in the
+    // terminal), so coming back to it is the moment to take the size back.
+    const onFocus = () => claimSizeAll();
+    window.addEventListener('focus', onFocus);
 
     // Reloading or closing right after a change must not lose it.
     const onLeaving = () => flushPrefs();
@@ -73,6 +80,7 @@ export function App() {
       stopKeys();
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', onVisible);
+      window.removeEventListener('focus', onFocus);
       window.removeEventListener('pagehide', onLeaving);
       window.removeEventListener('beforeunload', onLeaving);
     };

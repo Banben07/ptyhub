@@ -59,6 +59,16 @@ interface DeviceRecord {
   createdAt: number;
   lastUsedAt: number;
   rotatedAt: number;
+  /**
+   * When the browser first presented the current secret, or null while a
+   * rotation has not been picked up yet. The previous secret stays valid until
+   * then: a rotated cookie can be lost in transit (a phone backgrounding the
+   * tab mid-response), and retiring the old secret before the browser holds
+   * the new one would lock out a perfectly legitimate device.
+   */
+  confirmedAt: number | null;
+  /** False for a "don't remember me" login, whose cookie ends with the browser session. */
+  persistent: boolean;
   expiresAt: number;
 }
 
@@ -200,6 +210,11 @@ export class Auth {
     private readonly log: (msg: string) => void,
   ) {
     this.devices = readJson<DevicesFile>(paths.devices, { devices: [] });
+    // Records written before these fields existed.
+    for (const d of this.devices.devices) {
+      if (d.confirmedAt === undefined) d.confirmedAt = d.prevHash ? null : d.rotatedAt;
+      if (d.persistent === undefined) d.persistent = true;
+    }
     this.pruneDevices();
   }
 
@@ -280,11 +295,31 @@ export class Auth {
     const presented = sha256(secret);
     if (constantTimeEquals(device.hash, presented)) {
       device.lastUsedAt = now;
-      this.saveDevicesSoon();
+      if (device.confirmedAt === null) {
+        // The browser has the new secret. Only now does the old one start
+        // running out, leaving a short window for requests already in flight.
+        device.confirmedAt = now;
+        device.prevExpiresAt = now + ROTATION_GRACE_MS;
+        this.saveDevices();
+      } else {
+        this.saveDevicesSoon();
+      }
       return { user: device.user, deviceId: device.id };
     }
 
     if (device.prevHash && constantTimeEquals(device.prevHash, presented)) {
+      if (device.confirmedAt === null) {
+        device.lastUsedAt = now;
+        this.saveDevicesSoon();
+        // Right after a rotation this is just a request that was already in
+        // flight. Well past it, the browser would be sending the new secret
+        // had it ever received it, so that response was lost: keep the device,
+        // and send a new secret again. Re-sending only then matters, because
+        // replacing the pending secret while its response may still be on the
+        // way would leave the browser holding one that no longer counts.
+        const lost = now - device.rotatedAt > ROTATION_GRACE_MS;
+        return { user: device.user, deviceId: device.id, staleSecret: lost };
+      }
       if (device.prevExpiresAt >= now) {
         // A request that was already in flight when we rotated. Allow it.
         return { user: device.user, deviceId: device.id };
@@ -300,9 +335,11 @@ export class Auth {
   }
 
   /**
-   * Called on authenticated HTTP responses. Rotates the device secret on a slow
-   * schedule so a leaked cookie has a bounded useful life, and so replay of an
-   * old one becomes detectable.
+   * Called on authenticated HTTP requests, before the handler writes anything:
+   * the new secret travels in a Set-Cookie header, so it has to be set while
+   * the headers can still change. Rotates the device secret on a slow schedule
+   * so a leaked cookie has a bounded useful life, and so replay of an old one
+   * becomes detectable.
    */
   maybeRotate(req: IncomingMessage, res: ServerResponse, auth: AuthContext): void {
     if (!auth.deviceId) return;
@@ -310,16 +347,18 @@ export class Auth {
     if (!device) return;
 
     const now = Date.now();
-    if (now - device.rotatedAt < ROTATE_AFTER_MS) return;
+    if (!auth.staleSecret && now - device.rotatedAt < ROTATE_AFTER_MS) return;
 
     const secret = crypto.randomBytes(32).toString('base64url');
-    device.prevHash = device.hash;
-    device.prevExpiresAt = now + ROTATION_GRACE_MS;
+    // Re-sending after a lost rotation keeps `prevHash` pointing at the secret
+    // the browser actually holds; the undelivered one is simply replaced.
+    if (!auth.staleSecret) device.prevHash = device.hash;
     device.hash = sha256(secret);
+    device.confirmedAt = null;
     device.rotatedAt = now;
     device.expiresAt = now + DEVICE_TTL_MS;
     this.saveDevices();
-    setCookie(req, res, `${device.id}.${secret}`, DEVICE_TTL_MS);
+    setCookie(req, res, `${device.id}.${secret}`, device.persistent ? DEVICE_TTL_MS : null);
   }
 
   // --- Login ---------------------------------------------------------------
@@ -447,6 +486,8 @@ export class Auth {
       createdAt: now,
       lastUsedAt: now,
       rotatedAt: now,
+      confirmedAt: now,
+      persistent: remember,
       expiresAt: now + DEVICE_TTL_MS,
     });
     this.saveDevices();

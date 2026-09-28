@@ -8,6 +8,7 @@
  *   npx tsx scripts/smoke-web.ts
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocket } from 'ws';
@@ -522,6 +523,28 @@ async function main(): Promise<void> {
 
     web.stop();
     await waitFor('gateway exit', () => web.child.exitCode !== null, 8000);
+
+    // While the gateway is down, doctor two credentials on disk:
+    //   api     — due for rotation, so its next request rotates the secret;
+    //   phone   — rotated two minutes ago, but that response never reached it,
+    //             so it still holds the secret the server rotated away from.
+    const devicesFile = path.join(sandbox.env.XDG_STATE_HOME!, 'ptyhub', 'devices.json');
+    const deviceIdOf = (cookie: string) =>
+      decodeURIComponent(/ptyhub_dev=([^;]+)/.exec(cookie)![1]!).split('.')[0];
+    const apiCookie = api.cookieHeader;
+    const phoneCookie = phone.cookieHeader;
+    const stored = JSON.parse(fs.readFileSync(devicesFile, 'utf8'));
+    for (const d of stored.devices) {
+      if (d.id === deviceIdOf(apiCookie)) d.rotatedAt = 0;
+      if (d.id === deviceIdOf(phoneCookie)) {
+        d.prevHash = d.hash;
+        d.hash = crypto.createHash('sha256').update('never-delivered').digest('base64');
+        d.confirmedAt = null;
+        d.rotatedAt = Date.now() - 2 * 60 * 1000;
+      }
+    }
+    fs.writeFileSync(devicesFile, JSON.stringify(stored));
+
     const web2 = launch('src/web/index.ts', sandbox.env);
     await waitFor('gateway restart', () => /listening on/.test(web2.logs()), 20000);
 
@@ -529,6 +552,39 @@ async function main(): Promise<void> {
     check(
       'session survives a gateway restart',
       afterRestart.status === 200 && afterRestart.json.session.alive === true,
+    );
+
+    // --- cookie rotation actually reaches the browser -----------------------
+
+    // The phone's request above presented a secret whose replacement was lost.
+    check(
+      'a device whose rotated cookie was lost is not locked out',
+      afterRestart.status === 200 && !/stale credential/.test(web2.logs()),
+    );
+    check(
+      'and it is sent a new secret again',
+      phone.cookieHeader.includes('ptyhub_dev=') && phone.cookieHeader !== phoneCookie,
+    );
+    const phoneAgain = await phone.get('/api/sessions');
+    check('the re-sent cookie authenticates', phoneAgain.status === 200);
+
+    const rotated = await api.get('/api/sessions');
+    check(
+      'a due rotation delivers a new cookie with the response',
+      rotated.status === 200 &&
+        api.cookieHeader.includes('ptyhub_dev=') &&
+        api.cookieHeader !== apiCookie,
+    );
+    const straggler = await new Client(origin).get('/api/sessions', { Cookie: apiCookie });
+    check('a request already in flight with the old cookie still works', straggler.status === 200);
+    const confirmed = await api.get('/api/sessions');
+    check('the rotated cookie authenticates', confirmed.status === 200);
+    const lateStraggler = await new Client(origin).get('/api/sessions', {
+      Cookie: apiCookie,
+    });
+    check(
+      'the old cookie stays accepted for the grace window after confirmation',
+      lateStraggler.status === 200 && !/stale credential/.test(web2.logs()),
     );
     web2.stop();
   } finally {

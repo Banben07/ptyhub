@@ -967,6 +967,31 @@ async function main(): Promise<void> {
     await page.keyboard.press('Escape');
     await sleep(300);
 
+    // --- OSC 52: programs can put text on the clipboard ---------------------
+
+    // How full-screen programs copy — Claude Code's fullscreen mode copies its
+    // own mouse selection this way. Non-ASCII included, since the payload is
+    // base64 of UTF-8 and decoding it as Latin-1 is the classic mistake.
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+    await page.evaluate(() => navigator.clipboard.writeText('before-osc52'));
+    const copied = 'osc52 copy ✓ 中文';
+    await page.click('.pane-slot');
+    await sleep(200);
+    await page.keyboard.type(
+      `printf '\\033]52;c;%s\\a' ${Buffer.from(copied, 'utf8').toString('base64')}`,
+    );
+    await page.keyboard.press('Enter');
+    const clipboardOk = await waitFor(
+      'OSC 52 to reach the clipboard',
+      async () => (await page.evaluate(() => navigator.clipboard.readText())) === copied,
+      5000,
+    );
+    check(
+      'OSC 52 from a program writes the clipboard',
+      clipboardOk,
+      JSON.stringify(await page.evaluate(() => navigator.clipboard.readText())),
+    );
+
     // --- preferences persist across a reload -------------------------------
 
     await page.reload({ waitUntil: 'domcontentloaded' });
@@ -1079,8 +1104,52 @@ async function main(): Promise<void> {
       `${(await activeSize(page))?.cols} columns`,
     );
 
-    await sharedPhone.close();
+    // A viewer nobody is looking at must not take the window just by
+    // reconnecting — a phone in a pocket waking up, a background tab after a
+    // gateway restart. Every such flip makes a full-screen program redraw, and
+    // programs that redraw in place (Claude Code) leave a copy behind each time.
+    await sharedPage.evaluate(() => {
+      document.hasFocus = () => false;
+    });
     web4.stop();
+    await waitFor('gateway exit', () => web4.child.exitCode !== null, 8000);
+    const web5 = launch('src/web/index.ts', sandbox.env);
+    await waitFor('gateway after restart', () => /listening on/.test(web5.logs()), 20000);
+    const socketOpen = (p: Page) =>
+      p.evaluate(() => {
+        const hub = (window as any).__ptyhub;
+        return hub.state(hub.active()) === 'open';
+      });
+    await waitFor('both sockets back', async () => (await socketOpen(page)) && (await socketOpen(sharedPage)), 15000);
+    await sleep(1500);
+    const afterReconnect = await activeSize(page);
+    check(
+      'an unfocused viewer reconnecting does not take the window',
+      !!afterReconnect && afterReconnect.cols > 90,
+      `${afterReconnect?.cols} columns`,
+    );
+
+    // Coming back to that page takes the size back without having to type.
+    await sharedPage.evaluate(() => {
+      delete (document as any).hasFocus;
+      window.dispatchEvent(new Event('focus'));
+    });
+    const followed = await waitFor(
+      'session to follow the refocused phone',
+      async () => {
+        const size = await activeSize(sharedPage);
+        return !!size && size.cols < 70;
+      },
+      10000,
+    );
+    check(
+      'focusing the page again takes the size back',
+      followed,
+      `${(await activeSize(sharedPage))?.cols} columns`,
+    );
+
+    await sharedPhone.close();
+    web5.stop();
 
     // --- mobile layout ------------------------------------------------------
 
@@ -1169,6 +1238,53 @@ async function main(): Promise<void> {
       3000,
     );
     check('the End key on the mobile bar scrolls back to the bottom', backAtBottom);
+
+    // A full-screen program that captures the mouse (Claude Code's fullscreen
+    // mode) scrolls itself on wheel events, and xterm ignores touches once
+    // mouse reporting is on — so a finger drag has to become wheel events.
+    // `cat -v` under the tty's echo prints each report the program receives.
+    await phonePage.keyboard.type(
+      "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; cat -v\n",
+    );
+    await waitFor(
+      'alternate screen with mouse reporting',
+      async () =>
+        (await phonePage.evaluate(() => {
+          const hub = (window as any).__ptyhub;
+          const term = hub.terminal(hub.active()).term;
+          return term.buffer.active.type === 'alternate' && term.modes.mouseTrackingMode !== 'none';
+        })) === true,
+      5000,
+    );
+    const screenBox = (await phonePage.locator('.xterm-screen').first().boundingBox())!;
+    const touchX = screenBox.x + screenBox.width / 2;
+    const touchY = screenBox.y + screenBox.height * 0.7;
+    const cdp = await phone.newCDPSession(phonePage);
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: touchX, y: touchY }],
+    });
+    // Finger moves up by several rows: content should move up, i.e. wheel down.
+    for (let step = 1; step <= 10; step++) {
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: touchX, y: touchY - step * 15 }],
+      });
+      await sleep(20);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    const wheelReported = await waitFor(
+      'wheel reports from a finger drag',
+      async () => /\[<65;\d+;\d+M/.test(await terminalText(phonePage)),
+      4000,
+    );
+    check(
+      'dragging a finger scrolls a full-screen program that captured the mouse',
+      wheelReported,
+    );
+    await phonePage.keyboard.press('Control+c');
+    await phonePage.keyboard.type("printf '\\033[?1000l\\033[?1006l\\033[?1049l'\n");
+    await sleep(300);
 
     // --- mobile session switcher --------------------------------------------
 

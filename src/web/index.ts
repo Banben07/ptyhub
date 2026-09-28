@@ -109,8 +109,12 @@ async function main(): Promise<void> {
 
     const ctx: Ctx = { req, res, url, params: match.params, auth: authCtx };
     try {
+      // Before the handler, not after: handlers send their response, and a
+      // Set-Cookie added once the headers are out is silently lost — which left
+      // the browser holding a secret the server had already retired. The auth
+      // routes set or clear the cookie themselves, so they are left alone.
+      if (!url.pathname.startsWith('/api/auth/')) auth.maybeRotate(req, res, authCtx);
       await match.handler(ctx);
-      auth.maybeRotate(req, res, authCtx);
     } catch (err) {
       if (res.headersSent) {
         res.end();

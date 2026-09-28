@@ -62,6 +62,16 @@ export function nudgeAll(): void {
 }
 
 /**
+ * Take the window size back for every terminal on screen. Called when the page
+ * comes back into use, so returning from a phone or another window restores
+ * the right size straight away instead of waiting for a keystroke. Terminals
+ * not mounted in a pane cannot measure and skip themselves.
+ */
+export function claimSizeAll(): void {
+  for (const term of terminals.values()) term.claimSize();
+}
+
+/**
  * Whole scrollback of a terminal as plain text.
  *
  * The WebGL renderer draws to a canvas, so there is no DOM to read; this goes

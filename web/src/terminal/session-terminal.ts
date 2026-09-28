@@ -72,6 +72,8 @@ export class SessionTerminal {
   private proposedCols = 0;
   private proposedRows = 0;
   private viewers = 1;
+  /** True while the snapshot from a (re)connect is being parsed. */
+  private replaying = false;
   private lastClaim = 0;
   private savedScroll: { line: number; atBottom: boolean } | null = null;
   private options: TerminalOptionsSource;
@@ -104,6 +106,10 @@ export class SessionTerminal {
       scrollback: options.prefs.scrollback,
       theme: xtermTheme(theme),
       macOptionIsMeta: true,
+      // Option-drag selects text even while a program has captured the mouse
+      // (Claude Code's fullscreen mode, vim with `mouse=a`). Other platforms
+      // get the same bypass with Shift, which xterm always honours.
+      macOptionClickForcesSelection: true,
       // The shell owns the screen; a local right-click menu would fight it.
       rightClickSelectsWord: false,
     });
@@ -127,6 +133,16 @@ export class SessionTerminal {
       }
     });
 
+    // OSC 52: a program asking the terminal to put text on the clipboard. It
+    // is how full-screen programs copy — Claude Code's fullscreen mode copies
+    // its own mouse selection this way whenever it thinks it is on the far end
+    // of SSH, which from a browser it always effectively is. Writes only; a
+    // program reading the clipboard back ("?") is never answered.
+    this.term.parser.registerOscHandler(52, (data) => {
+      this.handleClipboardWrite(data);
+      return true;
+    });
+
     this.term.onData((data) => this.sendInput(data));
     this.term.onBinary((data) => {
       const bytes = new Uint8Array(data.length);
@@ -136,6 +152,79 @@ export class SessionTerminal {
 
     this.observer = new ResizeObserver(() => this.scheduleMeasure());
     this.observer.observe(this.host);
+    this.installTouchScroll();
+  }
+
+  /**
+   * Let a finger scroll programs that own the whole screen.
+   *
+   * A full-screen program (Claude Code's fullscreen mode, less, vim) has no
+   * scrollback for the finger to move; it scrolls itself in response to the
+   * mouse wheel. And once such a program turns on mouse reporting, xterm stops
+   * looking at touches entirely. So a one-finger vertical drag is turned into
+   * wheel events, one per row travelled, handed to xterm's own wheel handling:
+   * it reports them to a program that asked for the mouse, and turns them into
+   * arrow keys for one that did not — the same as a real wheel would.
+   *
+   * Ordinary shell output is left to xterm's native touch scrolling.
+   */
+  private installTouchScroll(): void {
+    let lastY: number | null = null;
+    let carry = 0;
+    const ownsScreen = () =>
+      this.term.buffer.active.type === 'alternate' ||
+      this.term.modes.mouseTrackingMode !== 'none';
+
+    this.host.addEventListener(
+      'touchstart',
+      (ev) => {
+        lastY = ev.touches.length === 1 && ownsScreen() ? ev.touches[0]!.clientY : null;
+        carry = 0;
+      },
+      { passive: true, capture: true },
+    );
+
+    this.host.addEventListener(
+      'touchmove',
+      (ev) => {
+        if (lastY === null || ev.touches.length !== 1) return;
+        const touch = ev.touches[0]!;
+        // Keep the page from scrolling or bouncing instead. Cancelling the
+        // first move also stops the browser synthesising a click at the end,
+        // so a drag is never mistaken for a tap by the program.
+        ev.preventDefault();
+        carry += lastY - touch.clientY;
+        lastY = touch.clientY;
+
+        const screen = this.mount.querySelector('.xterm-screen');
+        if (!screen) return;
+        // On screen, so it already accounts for any scale-to-fit transform.
+        const rowHeight = screen.getBoundingClientRect().height / this.term.rows;
+        if (!(rowHeight > 0)) return;
+        while (Math.abs(carry) >= rowHeight) {
+          const direction = Math.sign(carry);
+          carry -= direction * rowHeight;
+          // Finger moving up means content moves up: later lines, wheel down.
+          screen.dispatchEvent(
+            new WheelEvent('wheel', {
+              deltaY: direction,
+              deltaMode: WheelEvent.DOM_DELTA_LINE,
+              clientX: touch.clientX,
+              clientY: touch.clientY,
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+        }
+      },
+      { passive: false, capture: true },
+    );
+
+    const end = () => {
+      lastY = null;
+    };
+    this.host.addEventListener('touchend', end, { capture: true });
+    this.host.addEventListener('touchcancel', end, { capture: true });
   }
 
   // -------------------------------------------------------------------------
@@ -266,8 +355,12 @@ export class SessionTerminal {
   private connect(): void {
     if (this.disposed) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // A viewer nobody is looking at attaches without a size. Declaring one
+    // would make it the most recent client and hand it the window, so a
+    // background tab or a phone waking up would squeeze the screen actually
+    // in use — and every such flip makes a full-screen program redraw.
     const size =
-      this.proposedCols > 0
+      this.proposedCols > 0 && this.inUse()
         ? `?cols=${this.proposedCols}&rows=${this.proposedRows}`
         : '';
     const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${this.id}${size}`);
@@ -339,12 +432,23 @@ export class SessionTerminal {
           ? null
           : { code: msg.session.exitCode, signal: msg.session.exitSignal };
         // Reset then size to the authoritative geometry, both before the
-        // snapshot bytes arrive, or the restored screen would wrap wrong.
-        this.term.reset();
+        // snapshot bytes are parsed, or the restored screen would wrap wrong.
+        // The reset goes through the write queue: xterm's `reset()` does not
+        // discard bytes from the previous socket that are still waiting to be
+        // parsed, so calling it directly would let a stale screenful land on
+        // top of the fresh terminal. The resize stays synchronous so that the
+        // later, authoritative size from `ready` is the one that sticks.
+        this.term.write(new Uint8Array(0), () => {
+          this.term.reset();
+          this.replaying = true;
+        });
         this.applyServerSize(msg.session.cols, msg.session.rows);
         break;
 
       case 'ready':
+        this.term.write(new Uint8Array(0), () => {
+          this.replaying = false;
+        });
         this.applyServerSize(msg.cols, msg.rows);
         this.scheduleMeasure();
         // The snapshot has just replayed a screenful of scrollback; show the
@@ -461,8 +565,45 @@ export class SessionTerminal {
    * attached there is nobody to yield to, and deferring would leave it staring
    * at somebody else's old geometry shrunk to a third of its size.
    */
+  /**
+   * Put text a program sent via OSC 52 on the clipboard.
+   *
+   * Skipped while a reconnect replays the screen, so old output cannot
+   * overwrite whatever was copied since, and on pages nobody is looking at, so
+   * a second device watching the same session does not copy along.
+   */
+  private handleClipboardWrite(data: string): void {
+    if (this.replaying || !document.hasFocus()) return;
+    const semi = data.indexOf(';');
+    if (semi < 0) return;
+    const payload = data.slice(semi + 1);
+    if (payload === '' || payload === '?') return;
+
+    let text: string;
+    try {
+      const binary = atob(payload);
+      const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+      text = new TextDecoder().decode(bytes);
+    } catch {
+      return; // Not base64; nothing sensible to copy.
+    }
+    void writeClipboard(text);
+  }
+
   private shouldDrive(): boolean {
     return this.options.drivesSize || this.viewers <= 1;
+  }
+
+  /**
+   * Whether somebody is looking at this page right now.
+   *
+   * Under the "active client wins" policy every size a viewer declares takes
+   * the window, so a hidden tab or an unfocused window must stay quiet. When
+   * it is the only viewer there is nobody to take the window from.
+   */
+  private inUse(): boolean {
+    if (this.viewers <= 1) return true;
+    return document.visibilityState === 'visible' && document.hasFocus();
   }
 
   /**
@@ -505,7 +646,11 @@ export class SessionTerminal {
     // last asked for. That way focusing a pane whose window no longer matches
     // hands control back to it — which is what the "active client wins" policy
     // is supposed to mean, and what makes a phone and a laptop usable in turn.
-    if (this.shouldDrive() && (cols !== this.term.cols || rows !== this.term.rows)) {
+    if (
+      this.shouldDrive() &&
+      this.inUse() &&
+      (cols !== this.term.cols || rows !== this.term.rows)
+    ) {
       this.proposedCols = cols;
       this.proposedRows = rows;
       // Resize locally straight away so dragging the window feels immediate;
@@ -615,5 +760,37 @@ export class SessionTerminal {
     this.term.dispose();
     this.host.remove();
     this.state.value = 'closed';
+  }
+}
+
+/**
+ * Write text to the clipboard. The async API needs a secure context (https or
+ * localhost); over plain http to another host fall back to the old
+ * select-and-copy trick, which works while the page still has focus.
+ */
+async function writeClipboard(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall through to the legacy path.
+  }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  const previous = document.activeElement as HTMLElement | null;
+  document.body.appendChild(area);
+  area.select();
+  try {
+    document.execCommand('copy');
+  } catch {
+    // Nothing else to try.
+  } finally {
+    area.remove();
+    previous?.focus();
   }
 }
