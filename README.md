@@ -236,6 +236,8 @@ Child processes inherit `ptyd`'s environment plus `TERM=xterm-256color` and `COL
 
 **The status pill turns amber or red.** Amber is reconnecting, red means the gateway cannot reach `ptyd`. Nothing running is lost in either case.
 
+**The network stalls or the device wakes up.** Both WebSocket channels check for replies, including when a socket still appears open. With foreground browser timers running, a silent connection is normally detected within about 15–20 seconds; returning to the page starts a fresh probe with an 8-second deadline. Healthy connections are kept, and failed ones reconnect automatically with bounded backoff. Input resumes after the screen snapshot is restored. Keys rejected while disconnected are reported and are not queued for later execution. Input already sent when the connection failed may or may not have reached the shell: check the last command before entering it again. This recovery does not guarantee lossless input or reduce network round-trip time.
+
 **A login page with no password set.** That device is not authorised yet. Run `ptyhub link` on the server.
 
 ---
@@ -249,13 +251,15 @@ npm run dev        # Vite dev server on 7421, proxying /api and /ws
 npm run build
 npm run icons      # regenerate icons from web/assets/icon.svg
 npm run typecheck
-npm test           # all four end-to-end suites
+npm test           # network recovery tests and all four end-to-end suites
 ```
 
-Every test is end-to-end against real processes in throwaway XDG directories, so they never touch a real configuration.
+The four end-to-end suites use real processes in throwaway XDG directories. Network recovery tests use a virtual clock and a real browser against an in-memory HTTP/WebSocket fixture; the browser suite builds the UI in memory. Neither approach touches real user configuration.
 
 | Suite | Covers |
 |---|---|
+| `test:network` | Deterministic heartbeat, timeout, backoff, offline, stale-callback, and input-replay checks |
+| `test:network-ui` | Real browser: silent connections, wake-up probes, delayed replies, offline recovery, and unsent-input feedback |
 | `test:ptyd` | Session lifecycle, screen restore, size reconciliation, locking, viewers outliving each other |
 | `test:web` | REST, WebSocket, all three auth paths, cross-origin rejection, gateway restart |
 | `test:cli` | `attach` inside a real PTY, the detach sequence, the picker, lock refusal |

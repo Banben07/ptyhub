@@ -7,6 +7,7 @@
  * because a gateway that restarted may have a different view of the world.
  */
 
+import { ReconnectingSocket } from './reconnecting-socket.ts';
 import type { EventsWsMessage, SessionMeta } from '../../src/shared/protocol.ts';
 import {
   applySessionEvent,
@@ -16,13 +17,22 @@ import {
   upsertSession,
 } from './state.ts';
 
-const RECONNECT_MIN_MS = 300;
-const RECONNECT_MAX_MS = 10_000;
-
-let ws: WebSocket | null = null;
-let backoff = RECONNECT_MIN_MS;
-let timer: number | null = null;
-let stopped = false;
+const connection = new ReconnectingSocket({
+  url: () => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${location.host}/ws/events`;
+  },
+  state: (state) => {
+    eventsConnected.value = state === 'open';
+    if (state !== 'open') ptydStatus.value = 'connecting';
+  },
+  message: (data, ready) => {
+    if (typeof data !== 'string') return;
+    const msg = JSON.parse(data) as EventsWsMessage;
+    handle(msg);
+    if (msg.t === 'snapshot') ready();
+  },
+});
 
 function patch(id: string, fields: Partial<SessionMeta>): void {
   applySessionEvent((list) =>
@@ -88,65 +98,15 @@ function handle(msg: EventsWsMessage): void {
   }
 }
 
-function connect(): void {
-  if (stopped) return;
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws/events`);
-
-  ws.onopen = () => {
-    backoff = RECONNECT_MIN_MS;
-    eventsConnected.value = true;
-  };
-  ws.onmessage = (ev) => {
-    try {
-      handle(JSON.parse(String(ev.data)) as EventsWsMessage);
-    } catch {
-      // A malformed frame is not worth tearing the channel down for.
-    }
-  };
-  ws.onclose = () => {
-    ws = null;
-    eventsConnected.value = false;
-    if (stopped) return;
-    // With the channel down we cannot know ptyd's health either.
-    ptydStatus.value = 'connecting';
-    schedule();
-  };
-  ws.onerror = () => {
-    // `onclose` follows.
-  };
-}
-
-function schedule(): void {
-  if (timer !== null || stopped) return;
-  const delay = backoff;
-  backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
-  timer = window.setTimeout(() => {
-    timer = null;
-    connect();
-  }, delay);
-}
-
 export function startEventStream(): void {
-  stopped = false;
-  connect();
+  connection.start();
 }
 
-/** Reconnect immediately, e.g. when a sleeping phone wakes up. */
+/** Probe even a socket that still appears open after sleep or a route change. */
 export function nudgeEventStream(): void {
-  if (ws || stopped) return;
-  if (timer !== null) {
-    clearTimeout(timer);
-    timer = null;
-  }
-  backoff = RECONNECT_MIN_MS;
-  connect();
+  connection.nudge();
 }
 
 export function stopEventStream(): void {
-  stopped = true;
-  if (timer !== null) clearTimeout(timer);
-  timer = null;
-  ws?.close();
-  ws = null;
+  connection.stop();
 }

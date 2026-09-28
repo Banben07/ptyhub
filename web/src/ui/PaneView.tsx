@@ -110,6 +110,7 @@ function TerminalPane({ paneId, sessionId }: { paneId: string; sessionId: string
   const meta = sessions.value.find((s) => s.id === sessionId) ?? null;
   const term = sessionId ? peekTerminal(sessionId) : undefined;
   const state = term?.state.value;
+  const inputNotice = term?.inputNotice.value;
   const exited = term?.exited.value ?? (meta && !meta.alive ? { code: meta.exitCode, signal: meta.exitSignal } : null);
   const splitOpen = leaves(layoutRoot.value).length > 1;
 
@@ -162,10 +163,19 @@ function TerminalPane({ paneId, sessionId }: { paneId: string; sessionId: string
       {sessionId ? (
         <>
           <div class="pane-slot" ref={slot} />
-          {state === 'reconnecting' && (
-            <div class="pane-banner warn">Reconnecting…</div>
-          )}
-          {exited && (
+          {(state === 'connecting' || state === 'reconnecting') ? (
+            <div class="pane-banner warn" role="status">
+              {state === 'connecting' ? 'Connecting…' : 'Reconnecting…'} Input paused.
+              {inputNotice && <span> {inputNotice}</span>}
+            </div>
+          ) : inputNotice ? (
+            <div class="pane-banner warn" role="status">
+              {inputNotice}{' '}
+              <button class="btn" onClick={() => { if (term) term.inputNotice.value = null; }}>
+                Dismiss
+              </button>
+            </div>
+          ) : exited && (
             <div class="pane-banner">
               Process exited{exited.code !== null ? ` with code ${exited.code}` : ''}.
             </div>

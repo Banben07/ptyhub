@@ -1,6 +1,6 @@
 import { useEffect } from 'preact/hooks';
 import { useSignalEffect } from '@preact/signals';
-import { startEventStream, nudgeEventStream } from './events.ts';
+import { startEventStream, nudgeEventStream, stopEventStream } from './events.ts';
 import { installKeyHandler } from './keys.ts';
 import {
   activeSession,
@@ -63,11 +63,11 @@ export function App() {
       claimSizeAll();
     };
     document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('online', onVisible);
+    window.addEventListener('pageshow', onVisible);
 
     // A hidden or unfocused page never proposes a size (see `inUse` in the
     // terminal), so coming back to it is the moment to take the size back.
-    const onFocus = () => claimSizeAll();
+    const onFocus = onVisible;
     window.addEventListener('focus', onFocus);
 
     // Reloading or closing right after a change must not lose it.
@@ -78,8 +78,9 @@ export function App() {
     return () => {
       stopDevice();
       stopKeys();
+      stopEventStream();
       document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('online', onVisible);
+      window.removeEventListener('pageshow', onVisible);
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('pagehide', onLeaving);
       window.removeEventListener('beforeunload', onLeaving);

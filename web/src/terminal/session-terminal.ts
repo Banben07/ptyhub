@@ -27,15 +27,14 @@ import type {
 import type { Prefs } from '../../../src/shared/prefs.ts';
 import { resolveFontFamily } from '../../../src/shared/prefs.ts';
 import { resolveTheme, xtermTheme } from '../theme.ts';
+import { ReconnectingSocket, type SocketState } from '../reconnecting-socket.ts';
 
-export type ConnState = 'connecting' | 'open' | 'reconnecting' | 'closed';
+export type ConnState = SocketState;
 
 const PADDING = 10;
 /** Below this the pane is mid-layout, not genuinely tiny. */
 const MIN_USABLE_COLS = 8;
 const MIN_USABLE_ROWS = 3;
-const RECONNECT_MIN_MS = 300;
-const RECONNECT_MAX_MS = 10_000;
 const RESIZE_DEBOUNCE_MS = 80;
 
 export interface TerminalOptionsSource {
@@ -55,20 +54,19 @@ export class SessionTerminal {
   readonly meta: Signal<SessionMeta | null> = signal<SessionMeta | null>(null);
   readonly exited = signal<{ code: number | null; signal: number | null } | null>(null);
   readonly latencyMs = signal<number | null>(null);
+  readonly inputNotice = signal<string | null>(null);
 
   private readonly scaler: HTMLDivElement;
   private readonly mount: HTMLDivElement;
   private readonly observer: ResizeObserver;
 
-  private ws: WebSocket | null = null;
+  private readonly connection: ReconnectingSocket;
   private webgl: WebglAddon | null = null;
   private opened = false;
   private disposed = false;
   private focused = false;
-  private backoff = RECONNECT_MIN_MS;
-  private reconnectTimer: number | null = null;
+  private sentInput = false;
   private resizeTimer: number | null = null;
-  private pingTimer: number | null = null;
   private proposedCols = 0;
   private proposedRows = 0;
   private viewers = 1;
@@ -83,6 +81,31 @@ export class SessionTerminal {
     options: TerminalOptionsSource,
   ) {
     this.options = options;
+    this.connection = new ReconnectingSocket({
+      url: () => {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const size = this.proposedCols > 0 && this.inUse()
+          ? `?cols=${this.proposedCols}&rows=${this.proposedRows}`
+          : '';
+        return `${proto}//${location.host}/ws/sessions/${this.id}${size}`;
+      },
+      state: (state) => {
+        if (state === 'reconnecting' && this.sentInput) {
+          this.inputNotice.value ??= 'Connection interrupted. Check the last command before typing it again.';
+          this.sentInput = false;
+        }
+        this.state.value = state;
+      },
+      latency: (ms) => { this.latencyMs.value = ms; },
+      message: (data, ready) => {
+        if (typeof data === 'string') {
+          this.handleControl(JSON.parse(data) as ServerWsMessage, ready);
+        } else {
+          this.term.write(new Uint8Array(data));
+          if (!this.focused) this.unread.value = true;
+        }
+      },
+    });
 
     this.host = document.createElement('div');
     this.host.className = 'term-host';
@@ -257,7 +280,7 @@ export class SessionTerminal {
       this.term.element?.addEventListener('focusout', () => {
         this.focused = false;
       });
-      this.connect();
+      this.connection.start();
     }
     this.scheduleMeasure();
     this.restoreScroll();
@@ -352,73 +375,12 @@ export class SessionTerminal {
   // Connection
   // -------------------------------------------------------------------------
 
-  private connect(): void {
-    if (this.disposed) return;
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // A viewer nobody is looking at attaches without a size. Declaring one
-    // would make it the most recent client and hand it the window, so a
-    // background tab or a phone waking up would squeeze the screen actually
-    // in use — and every such flip makes a full-screen program redraw.
-    const size =
-      this.proposedCols > 0 && this.inUse()
-        ? `?cols=${this.proposedCols}&rows=${this.proposedRows}`
-        : '';
-    const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${this.id}${size}`);
-    ws.binaryType = 'arraybuffer';
-    this.ws = ws;
-    this.state.value = this.state.value === 'closed' ? 'connecting' : this.state.value;
-
-    ws.onopen = () => {
-      this.backoff = RECONNECT_MIN_MS;
-      this.state.value = 'open';
-      this.startPing();
-    };
-
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        this.handleControl(JSON.parse(ev.data) as ServerWsMessage);
-        return;
-      }
-      const bytes = new Uint8Array(ev.data as ArrayBuffer);
-      this.term.write(bytes);
-      if (!this.focused) this.unread.value = true;
-    };
-
-    ws.onclose = () => {
-      this.stopPing();
-      this.ws = null;
-      if (this.disposed) return;
-      this.state.value = 'reconnecting';
-      this.scheduleReconnect();
-    };
-
-    ws.onerror = () => {
-      // `onclose` always follows; retry logic lives there.
-    };
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer !== null || this.disposed) return;
-    const delay = this.backoff;
-    this.backoff = Math.min(this.backoff * 2, RECONNECT_MAX_MS);
-    this.reconnectTimer = window.setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, delay);
-  }
-
-  /** Reconnect right now, e.g. when the tab becomes visible again. */
+  /** Probe even a socket that still appears open after sleep or a route change. */
   nudge(): void {
-    if (this.disposed || this.ws) return;
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.backoff = RECONNECT_MIN_MS;
-    this.connect();
+    this.connection.nudge();
   }
 
-  private handleControl(msg: ServerWsMessage): void {
+  private handleControl(msg: ServerWsMessage, ready: () => boolean): void {
     switch (msg.t) {
       case 'viewers':
         this.viewers = msg.viewers;
@@ -439,6 +401,7 @@ export class SessionTerminal {
         // top of the fresh terminal. The resize stays synchronous so that the
         // later, authoritative size from `ready` is the one that sticks.
         this.term.write(new Uint8Array(0), () => {
+          if (this.disposed) return;
           this.term.reset();
           this.replaying = true;
         });
@@ -447,7 +410,9 @@ export class SessionTerminal {
 
       case 'ready':
         this.term.write(new Uint8Array(0), () => {
+          if (this.disposed || !ready()) return;
           this.replaying = false;
+          this.scheduleMeasure();
         });
         this.applyServerSize(msg.cols, msg.rows);
         this.scheduleMeasure();
@@ -485,25 +450,13 @@ export class SessionTerminal {
       }
 
       case 'pong':
-        this.latencyMs.value = Date.now() - msg.ts;
+        // Consumed by the shared connection watchdog.
         break;
 
       case 'error':
         this.term.write(`\r\n\x1b[31m[ptyhub: ${msg.message}]\x1b[0m\r\n`);
         break;
     }
-  }
-
-  private startPing(): void {
-    this.stopPing();
-    this.pingTimer = window.setInterval(() => {
-      this.sendControl({ t: 'ping', ts: Date.now() });
-    }, 15_000);
-  }
-
-  private stopPing(): void {
-    if (this.pingTimer !== null) clearInterval(this.pingTimer);
-    this.pingTimer = null;
   }
 
   // -------------------------------------------------------------------------
@@ -655,8 +608,11 @@ export class SessionTerminal {
       this.proposedRows = rows;
       // Resize locally straight away so dragging the window feels immediate;
       // ptyd confirms with a `resized` message a moment later.
-      this.term.resize(cols, rows);
-      this.sendControl({ t: 'resize', cols, rows });
+      // Don't change geometry while a snapshot is still being parsed. The
+      // ready callback measures again once input and resizing are safe.
+      if (this.state.value === 'open' && this.sendControl({ t: 'resize', cols, rows })) {
+        this.term.resize(cols, rows);
+      }
     }
     this.applyScale();
   }
@@ -729,8 +685,8 @@ export class SessionTerminal {
   // Output
   // -------------------------------------------------------------------------
 
-  private sendControl(msg: ClientWsMessage): void {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+  private sendControl(msg: ClientWsMessage): boolean {
+    return this.connection.send(JSON.stringify(msg));
   }
 
   private sendInput(data: string): void {
@@ -740,7 +696,12 @@ export class SessionTerminal {
   }
 
   private sendBytes(bytes: Uint8Array): void {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(bytes);
+    if (this.connection.send(bytes)) {
+      this.sentInput = true;
+      this.inputNotice.value = null;
+    } else {
+      this.inputNotice.value = 'Input was not sent. Wait for the connection, then check the terminal before typing again.';
+    }
   }
 
   /** Type text into the session, used by the mobile key bar and the palette. */
@@ -751,12 +712,9 @@ export class SessionTerminal {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.stopPing();
-    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.connection.stop();
     if (this.resizeTimer !== null) clearTimeout(this.resizeTimer);
     this.observer.disconnect();
-    this.ws?.close();
-    this.ws = null;
     this.term.dispose();
     this.host.remove();
     this.state.value = 'closed';

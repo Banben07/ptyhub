@@ -50,7 +50,7 @@ export function StatusPill() {
 
   const level =
     ptyd === 'down' ? 'down'
-    : ptyd === 'connecting' || !events || termState === 'reconnecting' ? 'warn'
+    : ptyd === 'connecting' || !events || (termState && termState !== 'open') ? 'warn'
     : 'ok';
 
   const label =
