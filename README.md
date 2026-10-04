@@ -76,7 +76,7 @@ Requires Node 22 or newer. `node-pty` installs from a prebuilt binary, so no com
 - `ptyhub link --qr` mints a single-use pairing link for phones and tablets. The key rides in the URL fragment, not the query string, so it never reaches the server log or a Referer header.
 - Only an explicit `"trustedNetwork": true` in the config turns authentication off entirely. Use it only where the network already authenticates — a WireGuard or Tailscale interface, for instance.
 
-Device credentials are stored as SHA-256 hashes and rotated on a schedule. Presenting a superseded credential after the grace window means the cookie was copied, so the whole device chain is revoked rather than quietly accepted. Settings → Devices lists every authorised browser and can revoke them individually.
+Device credentials are stored as SHA-256 hashes and rotated on a schedule. Presenting a superseded credential after the grace window means the cookie was copied, so the whole device chain is revoked rather than quietly accepted. Settings → Devices lists every authorised browser and can revoke them individually. Revocation and sign-out immediately disconnect that device's terminal and event sockets; other devices keep working.
 
 WebSocket upgrades validate the `Origin` header, without which any site you visit could open a socket to your shell — SameSite cookies do not fully cover the WebSocket handshake. REST relies on SameSite plus the same Origin check. Failed logins back off exponentially per source IP and lock out for fifteen minutes after ten attempts.
 
@@ -236,7 +236,9 @@ Child processes inherit `ptyd`'s environment plus `TERM=xterm-256color` and `COL
 
 **The status pill turns amber or red.** Amber is reconnecting, red means the gateway cannot reach `ptyd`. Nothing running is lost in either case.
 
-**The network stalls or the device wakes up.** Both WebSocket channels check for replies, including when a socket still appears open. With foreground browser timers running, a silent connection is normally detected within about 15–20 seconds; returning to the page starts a fresh probe with an 8-second deadline. Healthy connections are kept, and failed ones reconnect automatically with bounded backoff. Input resumes after the screen snapshot is restored. Keys rejected while disconnected are reported and are not queued for later execution. Input already sent when the connection failed may or may not have reached the shell: check the last command before entering it again. This recovery does not guarantee lossless input or reduce network round-trip time.
+**The network stalls or the device wakes up.** Both WebSocket channels check for replies, including when a socket still appears open. With foreground browser timers running, a silent connection is normally detected within about 15–20 seconds. Returning to the page starts a fresh probe with the same tolerance as normal heartbeats. Measured slow replies extend the probe deadline, up to 60 seconds. Healthy connections are kept, and failed ones reconnect automatically with bounded backoff. Input resumes after the screen snapshot is restored. Keys rejected while disconnected are reported and are not queued for later execution. Input already sent when the connection failed may or may not have reached the shell: check the last command before entering it again. This recovery does not guarantee lossless input or reduce network round-trip time.
+
+**Loading or saving fails during an outage.** Each HTTP attempt has a 15-second deadline, including its response body. Temporary read failures are retried once. New/close terminal and authentication operations are never automatically repeated. Appearance, layout and shared keyboard changes remain queued in the open page, are saved in order, and retry after temporary failures or when the network returns. Keep the page open until those settings are saved; an offline page cannot guarantee delivery after it is closed.
 
 **A login page with no password set.** That device is not authorised yet. Run `ptyhub link` on the server.
 
@@ -258,8 +260,8 @@ The four end-to-end suites use real processes in throwaway XDG directories. Netw
 
 | Suite | Covers |
 |---|---|
-| `test:network` | Deterministic heartbeat, timeout, backoff, offline, stale-callback, and input-replay checks |
-| `test:network-ui` | Real browser: silent connections, wake-up probes, delayed replies, offline recovery, and unsent-input feedback |
+| `test:network` | Heartbeat and HTTP deadlines, settings retries, stale callbacks; real WebSocket handshake, revocation and IPC race tests |
+| `test:network-ui` | Real browser: silent connections, wake-up probes, delayed replies, offline recovery, input feedback and settings persistence |
 | `test:ptyd` | Session lifecycle, screen restore, size reconciliation, locking, viewers outliving each other |
 | `test:web` | REST, WebSocket, all three auth paths, cross-origin rejection, gateway restart |
 | `test:cli` | `attach` inside a real PTY, the detach sequence, the picker, lock refusal |

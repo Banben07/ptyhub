@@ -29,7 +29,7 @@
     "icons": "tsx scripts/gen-icons.ts",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run test:network && npm run test:network-ui && npm run test:ptyd && npm run test:web && npm run test:cli && npm run build && npm run test:ui",
-    "test:network": "tsx --test scripts/test-network.ts",
+    "test:network": "tsx --test scripts/test-network.ts scripts/test-http-recovery.ts scripts/test-gateway-recovery.ts",
     "test:network-ui": "tsx scripts/smoke-network-ui.ts",
     "test:ptyd": "tsx scripts/smoke-ptyd.ts",
     "test:web": "tsx scripts/smoke-web.ts",

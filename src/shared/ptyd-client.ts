@@ -65,9 +65,10 @@ export class PtydClient {
   static connect(
     socketFile: string,
     handlers: PtydClientHandlers = {},
+    signal?: AbortSignal,
   ): Promise<PtydClient> {
     return new Promise((resolve, reject) => {
-      const socket = net.connect(socketFile);
+      const socket = net.connect({ path: socketFile, signal });
       const onError = (err: Error) => {
         socket.destroy();
         reject(err);

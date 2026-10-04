@@ -157,7 +157,7 @@ test('waking probes an OPEN socket and repeated focus events cannot defer failur
   t.mock.timers.tick(6_000);
   f.connection.nudge();
   assert.equal(socket.closed, false);
-  t.mock.timers.tick(2_000);
+  t.mock.timers.tick(9_000);
   assert.equal(socket.closed, true);
 });
 
@@ -253,4 +253,30 @@ test('malformed control messages do not mark a connection healthy or delay its t
   assert.deepEqual(f.messages, []);
   t.mock.timers.tick(5_000);
   assert.equal(f.latest().closed, true);
+});
+
+test('a nine-second reply survives both normal and wake-up probes', (t) => {
+  const f = setup(t);
+  const socket = f.ready();
+  t.mock.timers.tick(9_000);
+  socket.pong();
+  f.connection.nudge();
+  t.mock.timers.tick(9_000);
+  socket.pong();
+  assert.equal(socket.closed, false);
+  assert.equal(FakeSocket.instances.length, 1);
+});
+
+test('heartbeat deadlines adapt to measured slow replies and remain bounded', (t) => {
+  const f = setup(t);
+  const socket = f.ready();
+  t.mock.timers.tick(9_000);
+  socket.pong();
+  t.mock.timers.tick(5_000);
+  t.mock.timers.tick(20_000);
+  socket.pong();
+  assert.equal(socket.closed, false);
+  t.mock.timers.tick(5_000);
+  t.mock.timers.tick(60_000);
+  assert.equal(socket.closed, true);
 });

@@ -38,6 +38,8 @@ export interface WsDeps {
   log: (msg: string) => void;
   /** Returns null when the request is not authenticated. */
   authenticate: (req: IncomingMessage) => AuthContext | null;
+  deviceActive: (id: string) => boolean;
+  onDeviceRevoked: (listener: (id: string | null) => void) => () => void;
 }
 
 function sendJson(ws: WebSocket, msg: ServerWsMessage | EventsWsMessage): void {
@@ -68,12 +70,29 @@ function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
 export function attachWebSockets(server: Server, deps: WsDeps): () => void {
   const { control, cfg, log, authenticate } = deps;
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  const devices = new Map<string, Set<WebSocket>>();
+  const identities = new WeakMap<WebSocket, AuthContext>();
+  const authorised = (ws: WebSocket): boolean => {
+    const auth = identities.get(ws);
+    if (!auth || (auth.deviceId && !deps.deviceActive(auth.deviceId))) {
+      ws.terminate();
+      return false;
+    }
+    return true;
+  };
+  const offRevocation = deps.onDeviceRevoked((id) => {
+    const groups = id === null ? [...devices.values()] : [devices.get(id)];
+    for (const group of groups) {
+      if (group) for (const ws of group) ws.terminate();
+    }
+  });
 
   // A suspended phone leaves a socket that looks open but never answers.
   // Heartbeats reap those so ptyd does not keep broadcasting into the void.
   const alive = new WeakSet<WebSocket>();
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
+      if (!authorised(ws)) continue;
       if (!alive.has(ws)) {
         ws.terminate();
         continue;
@@ -84,13 +103,32 @@ export function attachWebSockets(server: Server, deps: WsDeps): () => void {
   }, HEARTBEAT_MS);
   heartbeat.unref?.();
 
-  const track = (ws: WebSocket) => {
+  const track = (ws: WebSocket, auth: AuthContext) => {
+    identities.set(ws, auth);
+    if (auth.deviceId) {
+      const id = auth.deviceId;
+      let group = devices.get(id);
+      if (!group) devices.set(id, (group = new Set()));
+      group.add(ws);
+      ws.once('close', () => {
+        group.delete(ws);
+        if (group.size === 0) devices.delete(id);
+      });
+    }
     alive.add(ws);
     ws.on('pong', () => alive.add(ws));
+    ws.on('error', () => ws.terminate());
   };
 
-  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    socket.on('error', () => socket.destroy());
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      rejectUpgrade(socket, 400, 'Bad Request');
+      return;
+    }
 
     // Without this check any page the user visits could open a socket to their
     // shell; SameSite cookies do not cover the WebSocket handshake.
@@ -114,16 +152,23 @@ export function attachWebSockets(server: Server, deps: WsDeps): () => void {
 
     if (parts[1] === 'events' && parts.length === 2) {
       wss.handleUpgrade(req, socket, head, (ws) => {
-        track(ws);
-        handleEvents(ws, control);
+        track(ws, auth);
+        if (authorised(ws)) handleEvents(ws, control, () => authorised(ws));
       });
       return;
     }
 
     if (parts[1] === 'sessions' && parts.length === 3) {
-      const sessionId = decodeURIComponent(parts[2]!);
+      let sessionId: string;
+      try {
+        sessionId = decodeURIComponent(parts[2]!);
+      } catch {
+        rejectUpgrade(socket, 400, 'Bad Request');
+        return;
+      }
       wss.handleUpgrade(req, socket, head, (ws) => {
-        track(ws);
+        track(ws, auth);
+        if (!authorised(ws)) return;
         void handleTerminal(
           ws,
           sessionId,
@@ -132,15 +177,27 @@ export function attachWebSockets(server: Server, deps: WsDeps): () => void {
             rows: positiveParam(url.searchParams.get('rows')),
           },
           deps,
+          () => authorised(ws),
         );
       });
       return;
     }
 
     rejectUpgrade(socket, 404, 'Not Found');
-  });
+  };
+  const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    try {
+      upgrade(req, socket, head);
+    } catch (err) {
+      log(`websocket upgrade failed: ${String(err)}`);
+      socket.destroy();
+    }
+  };
+  server.on('upgrade', handleUpgrade);
 
   return () => {
+    server.removeListener('upgrade', handleUpgrade);
+    offRevocation();
     clearInterval(heartbeat);
     for (const ws of wss.clients) ws.terminate();
     wss.close();
@@ -149,7 +206,7 @@ export function attachWebSockets(server: Server, deps: WsDeps): () => void {
 
 // ---------------------------------------------------------------------------
 
-function handleEvents(ws: WebSocket, control: PtydControl): void {
+function handleEvents(ws: WebSocket, control: PtydControl, authorised: () => boolean): void {
   sendJson(ws, {
     t: 'snapshot',
     sessions: control.listCached(),
@@ -166,6 +223,7 @@ function handleEvents(ws: WebSocket, control: PtydControl): void {
   });
 
   ws.on('message', (raw) => {
+    if (!authorised()) return;
     try {
       const msg = JSON.parse(String(raw)) as ClientWsMessage;
       if (msg.t === 'ping') sendJson(ws, { t: 'pong', ts: msg.ts });
@@ -187,14 +245,49 @@ async function handleTerminal(
   sessionId: string,
   size: { cols: number | undefined; rows: number | undefined },
   deps: WsDeps,
+  authorised: () => boolean,
 ): Promise<void> {
   const { cfg, socketFile, log } = deps;
 
-  let client: PtydClient;
+  let client: PtydClient | null = null;
+  let ended = false;
+  let attached = false;
+  const connecting = new AbortController();
+  const cleanup = () => {
+    ended = true;
+    const current = client;
+    client = null;
+    connecting.abort();
+    current?.close();
+  };
+  ws.once('close', cleanup);
+  ws.once('error', cleanup);
+  const active = () => !ended && ws.readyState === ws.OPEN && authorised();
+
+  // Install before starting any asynchronous IPC work. A ready frame can reach
+  // the browser before subscribe() resolves, and its first input must not vanish.
+  ws.on('message', (raw, isBinary) => {
+    if (!active()) return;
+    if (isBinary) {
+      if (attached) client?.sendInput(sessionId, raw as Buffer);
+      return;
+    }
+    try {
+      const msg = JSON.parse(String(raw)) as ClientWsMessage;
+      if (msg.t === 'resize' && attached) {
+        void client?.resize(sessionId, msg.cols, msg.rows).catch(() => {});
+      } else if (msg.t === 'ping') {
+        sendJson(ws, { t: 'pong', ts: msg.ts });
+      }
+    } catch {
+      log(`ignoring malformed control frame on session ${sessionId}`);
+    }
+  });
+
   try {
     client = await PtydClient.connect(socketFile, {
       onOutput: (_id, data) => {
-        if (ws.readyState !== ws.OPEN) return;
+        if (ended || ws.readyState !== ws.OPEN) return;
         // Silently skipping output here would be the same mistake ptyd itself
         // avoids on the other leg of this pipe: a browser that cannot keep up
         // would carry on believing it is in sync while missing bytes out of
@@ -215,9 +308,11 @@ async function handleTerminal(
         ws.send(data, { binary: true });
       },
       onEvent: (evt) => {
+        if (ended) return;
         if ('id' in evt && evt.id !== sessionId) return;
         switch (evt.ev) {
           case 'ready':
+            attached = true;
             sendJson(ws, { t: 'ready', cols: evt.cols, rows: evt.rows });
             break;
           case 'resized':
@@ -247,6 +342,7 @@ async function handleTerminal(
         }
       },
       onClose: () => {
+        if (ended) return;
         sendJson(ws, {
           t: 'error',
           code: 'ptyd_unavailable',
@@ -254,8 +350,9 @@ async function handleTerminal(
         });
         ws.close(1011, 'ptyd unavailable');
       },
-    });
+    }, connecting.signal);
   } catch (err) {
+    if (ended) return;
     sendJson(ws, {
       t: 'error',
       code: 'ptyd_unavailable',
@@ -265,11 +362,12 @@ async function handleTerminal(
     return;
   }
 
-  ws.on('close', () => client.close());
-  ws.on('error', () => client.close());
+  if (!active()) { cleanup(); return; }
+  const connected = client;
 
   try {
-    const meta = await client.get(sessionId);
+    const meta = await connected.get(sessionId);
+    if (!active()) { cleanup(); return; }
     // The browser resets its terminal on `hello`, so it must arrive before the
     // snapshot bytes that subscribe is about to produce.
     sendJson(ws, { t: 'hello', session: meta, policy: cfg.resizePolicy });
@@ -277,32 +375,17 @@ async function handleTerminal(
     // Only declare a size when the client actually told us one; a viewer that
     // has not measured itself yet must not get a vote.
     const wantsSize = size.cols !== undefined && size.rows !== undefined;
-    await client.subscribe(sessionId, {
+    await connected.subscribe(sessionId, {
       cols: wantsSize ? size.cols : undefined,
       rows: wantsSize ? size.rows : undefined,
     });
+    if (!active()) cleanup();
   } catch (err) {
+    if (ended) return;
     const message = err instanceof Error ? err.message : String(err);
     sendJson(ws, { t: 'error', code: 'attach_failed', message });
     ws.close(1011, 'attach failed');
-    client.close();
+    cleanup();
     return;
   }
-
-  ws.on('message', (raw, isBinary) => {
-    if (isBinary) {
-      client.sendInput(sessionId, raw as Buffer);
-      return;
-    }
-    try {
-      const msg = JSON.parse(String(raw)) as ClientWsMessage;
-      if (msg.t === 'resize') {
-        void client.resize(sessionId, msg.cols, msg.rows).catch(() => {});
-      } else if (msg.t === 'ping') {
-        sendJson(ws, { t: 'pong', ts: msg.ts });
-      }
-    } catch {
-      log(`ignoring malformed control frame on session ${sessionId}`);
-    }
-  });
 }

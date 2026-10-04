@@ -37,6 +37,7 @@ import {
   notify,
   prefs,
   setFontSize,
+  saveSharedKeymap,
   setLocalShortcuts,
   settingsOpen,
   sharedKeymap,
@@ -499,8 +500,7 @@ function KeyboardSettings() {
   }, [recording]);
 
   const saveShared = (next: SharedKeymap) => {
-    sharedKeymap.value = next;
-    void api.saveKeymap(next).catch(() => notify('could not save the keymap', 'error'));
+    saveSharedKeymap(next);
   };
 
   const byAction = new Map<ActionId, string>();

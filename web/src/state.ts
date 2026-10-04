@@ -14,6 +14,7 @@ import { defaultPrefs, deviceClassFor } from '../../src/shared/prefs.ts';
 import type { SharedKeymap } from '../../src/shared/keymap.ts';
 import { defaultSharedKeymap, mergeKeymap } from '../../src/shared/keymap.ts';
 import { api, ApiError, type AuthStatus, type Health } from './api.ts';
+import { PendingSave, PrefsSync } from './prefs-sync.ts';
 import { localShortcuts, setLocalShortcuts } from './local-shortcuts.ts';
 import {
   closePane,
@@ -503,18 +504,37 @@ export function cycleSession(step: number): void {
 
 // --- Preferences ------------------------------------------------------------
 
-let prefsTimer: number | null = null;
+const reportSaveError = (err: unknown) => {
+  if (err instanceof ApiError && err.transient) {
+    notify('Settings are waiting to be saved. They will retry when the connection recovers.', 'info');
+  } else {
+    reportError(err, 'could not save settings');
+  }
+};
+const prefsSync = new PrefsSync(api.savePrefs, reportSaveError);
+const keymapSync = new PendingSave<SharedKeymap>(api.saveKeymap, reportSaveError);
+
+export function startPrefsSync(): () => void {
+  prefsSync.start();
+  keymapSync.start();
+  return () => { prefsSync.stop(); keymapSync.stop(); };
+}
+
+export function saveSharedKeymap(next: SharedKeymap): void {
+  sharedKeymap.value = next;
+  keymapSync.enqueue(next);
+}
 
 export function updatePrefs(patch: Partial<Prefs>): void {
   prefs.value = { ...prefs.value, ...patch };
   applyOptionsToAll();
-  schedulePrefsSave();
+  prefsSync.enqueue(patch);
 }
 
 export function updateFontPrefs(patch: Partial<Prefs['font']>): void {
   prefs.value = { ...prefs.value, font: { ...prefs.value.font, ...patch } };
   applyOptionsToAll();
-  schedulePrefsSave();
+  prefsSync.enqueue({ font: prefs.value.font });
 }
 
 export function setFontSize(size: number): void {
@@ -523,56 +543,43 @@ export function setFontSize(size: number): void {
   });
 }
 
-function schedulePrefsSave(): void {
-  if (prefsTimer !== null) clearTimeout(prefsTimer);
-  prefsTimer = window.setTimeout(() => {
-    prefsTimer = null;
-    void api.savePrefs(prefs.value).catch((err) => reportError(err, 'could not save preferences'));
-  }, 400);
-}
-
-/**
- * Write preferences out immediately, even if the page is going away.
- *
- * Without this, dragging a tab and then reloading within the debounce window
- * silently loses the new order. `keepalive` lets the request outlive the
- * document, which a normal fetch would not.
- */
+/** Best-effort write when leaving. Unconfirmed edits remain queued in memory
+ * if the page stays alive (for example, a phone backgrounding the browser). */
 export function flushPrefs(): void {
-  if (prefsTimer === null && layoutTimer === null) return;
-  if (prefsTimer !== null) clearTimeout(prefsTimer);
-  if (layoutTimer !== null) clearTimeout(layoutTimer);
-  prefsTimer = null;
-  layoutTimer = null;
-
-  const body = JSON.stringify({ prefs: { ...prefs.value, layout: layoutRoot.value } });
-  void fetch('/api/prefs', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body,
-    credentials: 'same-origin',
-    keepalive: true,
-  }).catch(() => {
-    // The page is unloading; there is nothing useful left to do about it.
-  });
+  const patch = prefsSync.snapshot();
+  const keymap = keymapSync.snapshot();
+  const save = (path: string, body: unknown) => {
+    void fetch(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      credentials: 'same-origin',
+      keepalive: true,
+    }).catch(() => {
+      // Ordinary queues retain these edits and can retry if the page returns.
+    });
+  };
+  if (patch) save('/api/prefs', { prefs: patch });
+  if (keymap) save('/api/keymap', { keymap });
 }
-
-let layoutTimer: number | null = null;
 
 function persistLayoutSoon(): void {
-  if (layoutTimer !== null) clearTimeout(layoutTimer);
-  layoutTimer = window.setTimeout(() => {
-    layoutTimer = null;
-    prefs.value = { ...prefs.value, layout: layoutRoot.value };
-    void api.savePrefs({ layout: layoutRoot.value }).catch(() => {
-      // Layout is a nicety; a failure here should not shout at the user.
-    });
-  }, 800);
+  prefs.value = { ...prefs.value, layout: layoutRoot.value };
+  prefsSync.enqueue({ layout: layoutRoot.value }, 800);
 }
 
 // --- Boot -------------------------------------------------------------------
 
-export async function boot(): Promise<void> {
+let booting: Promise<void> | null = null;
+
+export function boot(): Promise<void> {
+  if (booting) return booting;
+  bootError.value = null;
+  booting = loadWorkspace().finally(() => { booting = null; });
+  return booting;
+}
+
+async function loadWorkspace(): Promise<void> {
   try {
     const status = await api.authStatus();
     authStatus.value = status;
@@ -608,8 +615,14 @@ export async function boot(): Promise<void> {
     }
 
     await ensureFirstSession();
+    prefsSync.resume();
+    keymapSync.resume();
   } catch (err) {
-    reportError(err, 'could not load the workspace');
+    if (err instanceof ApiError && err.unauthenticated) {
+      reportError(err, 'could not load the workspace');
+    } else {
+      bootError.value = err instanceof Error ? err.message : 'could not load the workspace';
+    }
   }
 }
 

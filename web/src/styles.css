@@ -975,6 +975,7 @@ body.dragging-tab {
 
 .pane-banner {
   position: absolute;
+  z-index: 5;
   left: 50%;
   bottom: 14px;
   transform: translateX(-50%);

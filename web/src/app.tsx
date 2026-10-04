@@ -19,6 +19,7 @@ import {
   sessions,
   settingsOpen,
   sidebarOpen,
+  startPrefsSync,
   terminalOptions,
   theme,
   trackDeviceClass,
@@ -50,6 +51,7 @@ export function App() {
   useEffect(() => {
     const stopDevice = trackDeviceClass();
     const stopKeys = installKeyHandler();
+    const stopPrefs = startPrefsSync();
     void boot().then(() => {
       if (authStatus.value?.authenticated) startEventStream();
     });
@@ -58,12 +60,19 @@ export function App() {
     // rather than waiting out an exponential backoff that never ticked.
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return;
+      if (bootError.value) {
+        void boot().then(() => {
+          if (authStatus.value?.authenticated && !bootError.value) startEventStream();
+        });
+        return;
+      }
       nudgeEventStream();
       nudgeAll();
       claimSizeAll();
     };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('pageshow', onVisible);
+    window.addEventListener('online', onVisible);
 
     // A hidden or unfocused page never proposes a size (see `inUse` in the
     // terminal), so coming back to it is the moment to take the size back.
@@ -78,9 +87,11 @@ export function App() {
     return () => {
       stopDevice();
       stopKeys();
+      stopPrefs();
       stopEventStream();
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('pageshow', onVisible);
+      window.removeEventListener('online', onVisible);
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('pagehide', onLeaving);
       window.removeEventListener('beforeunload', onLeaving);

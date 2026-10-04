@@ -19,39 +19,71 @@ export class ApiError extends Error {
   get unauthenticated(): boolean {
     return this.status === 401;
   }
+
+  get transient(): boolean {
+    return this.status === 0 || this.status === 502 || this.status === 503 || this.status === 504;
+  }
 }
 
-async function call<T>(
+const REQUEST_TIMEOUT_MS = 15_000;
+
+async function attempt<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    credentials: 'same-origin',
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(path, {
+      method,
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: 'same-origin',
+      signal: controller.signal,
+    });
 
-  const text = await res.text();
-  let json: unknown = null;
-  if (text) {
-    try {
-      json = JSON.parse(text);
-    } catch {
-      // Non-JSON bodies only happen for static fallbacks.
+    const text = await res.text();
+    let json: unknown = null;
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        // Non-JSON bodies only happen for static fallbacks.
+      }
     }
-  }
 
-  if (!res.ok) {
-    const error = (json as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(
-      res.status,
-      error?.code ?? 'http_error',
-      error?.message ?? `${method} ${path} failed with ${res.status}`,
-    );
+    if (!res.ok) {
+      const error = (json as { error?: { code?: string; message?: string } } | null)?.error;
+      throw new ApiError(
+        res.status,
+        error?.code ?? 'http_error',
+        error?.message ?? `${method} ${path} failed with ${res.status}`,
+      );
+    }
+    return json as T;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    const message = controller.signal.aborted ? 'Request timed out.' : 'Cannot reach the server.';
+    const advice = method === 'GET' ? ' Please try again.'
+      : ' Check whether the operation completed before retrying.';
+    throw new ApiError(0, controller.signal.aborted ? 'request_timeout' : 'network_error', message + advice);
+  } finally {
+    // The deadline includes reading the body; headers alone don't mean a
+    // response finished, especially over a route that died halfway through it.
+    clearTimeout(timer);
   }
-  return json as T;
+}
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  try {
+    return await attempt<T>(method, path, body);
+  } catch (err) {
+    // Only reads are retried here. A timed-out mutation may already have run.
+    if (method !== 'GET' || !(err instanceof ApiError) || !err.transient) throw err;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return attempt<T>(method, path, body);
+  }
 }
 
 export interface Health {

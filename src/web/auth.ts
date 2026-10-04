@@ -204,6 +204,28 @@ export type LoginResult = { ok: true; user: string } | LoginFailure;
 export class Auth {
   private devices: DevicesFile;
   private failures = new Map<string, { count: number; lockedUntil: number }>();
+  private readonly revocationListeners = new Set<(id: string | null) => void>();
+
+  /** null means every device was revoked. Existing sockets are tied to the
+   * device identity, not the cookie secret, which may rotate during their life. */
+  onDeviceRevoked(listener: (id: string | null) => void): () => void {
+    this.revocationListeners.add(listener);
+    return () => this.revocationListeners.delete(listener);
+  }
+
+  deviceActive(id: string): boolean {
+    const device = this.devices.devices.find((d) => d.id === id);
+    if (!device) return false;
+    if (device.expiresAt <= Date.now()) {
+      this.removeDevice(id);
+      return false;
+    }
+    return true;
+  }
+
+  private announceRevocation(id: string | null): void {
+    for (const listener of this.revocationListeners) listener(id);
+  }
 
   constructor(
     private readonly cfg: Config,
@@ -521,20 +543,24 @@ export class Auth {
     this.devices.devices = this.devices.devices.filter((d) => d.id !== id);
     if (this.devices.devices.length === before) return false;
     this.saveDevices();
+    this.announceRevocation(id);
     return true;
   }
 
   revokeAll(): void {
     this.devices.devices = [];
     this.saveDevices();
+    this.announceRevocation(null);
   }
 
   private pruneDevices(): void {
     const now = Date.now();
     const kept = this.devices.devices.filter((d) => d.expiresAt > now);
     if (kept.length !== this.devices.devices.length) {
+      const expired = this.devices.devices.filter((d) => d.expiresAt <= now);
       this.devices.devices = kept;
       this.saveDevices();
+      for (const device of expired) this.announceRevocation(device.id);
     }
   }
 

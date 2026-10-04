@@ -70,7 +70,15 @@ async function main(): Promise<void> {
     res: http.ServerResponse,
   ): Promise<void> {
     securityHeaders(res);
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      // Validate before static/font handlers decode their paths too.
+      decodeURIComponent(url.pathname);
+    } catch {
+      sendError(res, 400, 'bad_url', 'invalid request URL');
+      return;
+    }
     const authCtx = auth.authenticate(req) ?? UNAUTHENTICATED;
 
     if (url.pathname.startsWith('/fonts/')) {
@@ -137,6 +145,8 @@ async function main(): Promise<void> {
     socketFile: socketPath(cfg),
     log,
     authenticate: (req) => auth.authenticate(req),
+    deviceActive: (id) => auth.deviceActive(id),
+    onDeviceRevoked: (listener) => auth.onDeviceRevoked(listener),
   });
 
   await new Promise<void>((resolve, reject) => {

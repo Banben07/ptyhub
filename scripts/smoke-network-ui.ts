@@ -31,14 +31,43 @@ async function main(): Promise<void> {
   }
   process.stdout.write('UI production build completed in memory.\n');
 
+  let storedPrefs = structuredClone(defaultPrefs);
+  let failPrefs = false;
+  let prefsAttempts = 0;
+  let failHealth = 1;
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+    if (pathname === '/api/prefs' && req.method === 'PUT') {
+      let body = '';
+      req.on('data', (chunk) => { body += String(chunk); });
+      req.on('end', () => {
+        prefsAttempts++;
+        if (failPrefs) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'temporary_failure', message: 'test outage' } }));
+          return;
+        }
+        const patch = JSON.parse(body).prefs;
+        storedPrefs = { ...storedPrefs, ...patch, font: {
+          ...storedPrefs.font, ...patch.font,
+          size: { ...storedPrefs.font.size, ...patch.font?.size },
+        } };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ prefs: storedPrefs }));
+      });
+      return;
+    }
     req.resume();
     if (pathname.startsWith('/api/')) {
+      if (pathname === '/api/health' && failHealth-- > 0) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'temporary_failure' } }));
+        return;
+      }
       const responses: Record<string, unknown> = {
         '/api/auth/status': { authenticated: true, user: 'test', openAccess: true, passwordConfigured: false },
         '/api/health': { ok: true, version: 'test', ptyd: 'connected', autoCreateFirstSession: false, resizePolicy: 'active', user: 'test' },
-        '/api/prefs': { prefs: defaultPrefs },
+        '/api/prefs': { prefs: storedPrefs },
         '/api/keymap': { keymap: defaultSharedKeymap },
         '/api/sessions': { sessions: [session] },
       };
@@ -129,6 +158,7 @@ async function main(): Promise<void> {
       const hub = (window as any).__ptyhub;
       return hub?.active() && hub.read(hub.active()).includes('Network snapshot restored');
     });
+    check('workspace loading retries a temporary HTTP failure');
     assert.equal(await page.evaluate(() => {
       const hub = (window as any).__ptyhub;
       return hub.state(hub.active());
@@ -163,7 +193,7 @@ async function main(): Promise<void> {
     await page.waitForFunction(() => {
       const hub = (window as any).__ptyhub;
       return hub.state(hub.active()) === 'reconnecting';
-    }, undefined, { timeout: 11_000 });
+    }, undefined, { timeout: 23_000 });
     await connected();
     assert.ok(counts.terminal > beforeWake.terminal);
     assert.equal(counts.events, beforeWake.events);
@@ -203,7 +233,34 @@ async function main(): Promise<void> {
     assert.equal(receivedInput.filter((input) => input === 'healthy input\r').length, 1);
     assert.deepEqual(errors, []);
     check('offline/online resumes automatically, reports unsent keys, and never replays commands');
-    process.stdout.write('6 browser network checks passed.\n');
+
+    // Exercise the actual settings UI rather than calling the save queue directly.
+    failPrefs = true;
+    const beforeSaves = prefsAttempts;
+    await page.click('button[title="Settings"]');
+    await page.getByRole('button', { name: 'Font', exact: true }).click();
+    const size = page.locator('.setting').filter({ hasText: 'Size on this desktop' }).locator('input[type="range"]');
+    await size.fill('18');
+    await page.waitForFunction(() => (window as any).__ptyhub.prefs().font.size.desktop === 18);
+    const saveDeadline = Date.now() + 5000;
+    while (prefsAttempts === beforeSaves && Date.now() < saveDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(prefsAttempts > beforeSaves);
+    await size.fill('19');
+    failPrefs = false;
+    await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+    const recoveryDeadline = Date.now() + 6000;
+    while (storedPrefs.font.size.desktop !== 19 && Date.now() < recoveryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(storedPrefs.font.size.desktop, 19);
+    await page.reload();
+    await connected();
+    assert.equal(await page.evaluate(() => (window as any).__ptyhub.prefs().font.size.desktop), 19);
+    assert.deepEqual(errors, []);
+    check('failed settings saves recover with the newest edit and survive a reload');
+    process.stdout.write('8 browser network checks passed.\n');
   } finally {
     await browser?.close();
     for (const timer of delayed) clearTimeout(timer);

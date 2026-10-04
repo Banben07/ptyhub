@@ -6,7 +6,7 @@ const CONNECT_TIMEOUT_MS = 15_000;
 const SYNC_TIMEOUT_MS = 30_000;
 const PING_INTERVAL_MS = 5_000;
 const PONG_TIMEOUT_MS = 15_000;
-const RESUME_TIMEOUT_MS = 8_000;
+const MAX_PONG_TIMEOUT_MS = 60_000;
 const STABLE_MS = 10_000;
 const MIN_RETRY_MS = 300;
 const MAX_RETRY_MS = 5_000;
@@ -33,6 +33,8 @@ export class ReconnectingSocket {
   private pingSequence = 0;
   private pingSentAt = 0;
   private resumeProbe = false;
+  private smoothedRtt: number | null = null;
+  private rttVariation = 0;
 
   constructor(private readonly handlers: Handlers) {}
 
@@ -73,7 +75,15 @@ export class ReconnectingSocket {
           if (this.pendingPing !== null && msg.ts === this.pendingPing) {
             this.pendingPing = null;
             this.resumeProbe = false;
-            this.handlers.latency?.(Math.max(0, Date.now() - this.pingSentAt));
+            const rtt = Math.max(0, Date.now() - this.pingSentAt);
+            if (this.smoothedRtt === null) {
+              this.smoothedRtt = rtt;
+              this.rttVariation = rtt / 2;
+            } else {
+              this.rttVariation = 0.75 * this.rttVariation + 0.25 * Math.abs(this.smoothedRtt - rtt);
+              this.smoothedRtt = 0.875 * this.smoothedRtt + 0.125 * rtt;
+            }
+            this.handlers.latency?.(rtt);
             if (Date.now() - this.readyAt >= STABLE_MS) this.backoff = MIN_RETRY_MS;
             this.arm(PING_INTERVAL_MS, () => this.probe());
           }
@@ -110,7 +120,10 @@ export class ReconnectingSocket {
     if (!socket || !this.usable || this.pendingPing !== null) return;
     this.pingSentAt = Date.now();
     this.pendingPing = ++this.pingSequence;
-    this.arm(PONG_TIMEOUT_MS, () => this.failed(socket));
+    const timeout = Math.min(MAX_PONG_TIMEOUT_MS, Math.max(
+      PONG_TIMEOUT_MS, (this.smoothedRtt ?? 0) + 4 * this.rttVariation + PING_INTERVAL_MS,
+    ));
+    this.arm(timeout, () => this.failed(socket));
     try {
       socket.send(JSON.stringify({ t: 'ping', ts: this.pendingPing }));
     } catch {
@@ -181,8 +194,6 @@ export class ReconnectingSocket {
       this.pendingPing = null;
       this.resumeProbe = true;
       this.probe();
-      const socket = this.socket;
-      if (socket) this.arm(RESUME_TIMEOUT_MS, () => this.failed(socket));
     }
   }
 
