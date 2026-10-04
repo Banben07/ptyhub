@@ -7,6 +7,7 @@
  */
 
 import net from 'node:net';
+import os from 'node:os';
 import type { Config } from '../shared/config.ts';
 import type {
   Event,
@@ -22,6 +23,7 @@ import {
   ProtocolError,
   encodeData,
   encodeJson,
+  isSessionId,
 } from '../shared/protocol.ts';
 import { VERSION } from '../shared/version.ts';
 import type { Subscriber } from './session.ts';
@@ -32,7 +34,54 @@ import { Registry, RegistryError } from './registry.ts';
  * Overridable so a test can shrink it and force the condition deterministically
  * without actually pushing megabytes through a real socket.
  */
-const MAX_SOCKET_BACKLOG = Number(process.env.PTYHUB_MAX_SOCKET_BACKLOG) || 8 * 1024 * 1024;
+const backlogOverride = Number(process.env.PTYHUB_MAX_SOCKET_BACKLOG);
+const MAX_SOCKET_BACKLOG = Number.isFinite(backlogOverride) && backlogOverride > 0
+  ? backlogOverride
+  : 8 * 1024 * 1024;
+
+interface ServerState {
+  connections: Set<Connection>;
+  startedAt: number;
+}
+
+/** JSON framing does not validate the runtime shape of a request. */
+function invalidRequest(req: Request): string | null {
+  const value = req as unknown as Record<string, unknown>;
+  const optionalString = (key: string) => value[key] === undefined || typeof value[key] === 'string';
+  const optionalNumber = (key: string) => value[key] === undefined ||
+    (typeof value[key] === 'number' && Number.isFinite(value[key]));
+  const optionalBoolean = (key: string) => value[key] === undefined || typeof value[key] === 'boolean';
+  if (['get', 'rename', 'kill', 'setLock', 'resize', 'subscribe', 'unsubscribe', 'snapshot'].includes(req.op) &&
+    (typeof value.id !== 'string' || !isSessionId(value.id))) return 'invalid session id';
+  switch (req.op) {
+    case 'create':
+      if (!optionalString('name') || !optionalString('cwd')) return 'name and cwd must be strings';
+      if (!optionalNumber('cols') || !optionalNumber('rows')) return 'size must contain finite numbers';
+      if (value.argv !== undefined && (!Array.isArray(value.argv) || value.argv.length === 0 ||
+        !value.argv.every((arg) => typeof arg === 'string') || !value.argv[0])) return 'argv must contain a command';
+      if (value.env !== undefined && (!value.env || typeof value.env !== 'object' || Array.isArray(value.env) ||
+        !Object.values(value.env).every((entry) => typeof entry === 'string'))) return 'env must contain string values';
+      break;
+    case 'rename':
+      if (typeof value.name !== 'string') return 'name must be a string';
+      break;
+    case 'kill':
+      if (!optionalBoolean('force') || !optionalString('signal')) return 'invalid kill options';
+      if (typeof value.signal === 'string' && !Object.hasOwn(os.constants.signals, value.signal)) return 'unknown signal';
+      break;
+    case 'setLock':
+      if (typeof value.locked !== 'boolean') return 'locked must be a boolean';
+      break;
+    case 'resize':
+      if (typeof value.cols !== 'number' || !Number.isFinite(value.cols) ||
+        typeof value.rows !== 'number' || !Number.isFinite(value.rows)) return 'size must contain finite numbers';
+      break;
+    case 'subscribe':
+      if (!optionalBoolean('snapshot') || !optionalNumber('cols') || !optionalNumber('rows')) return 'invalid subscription options';
+      break;
+  }
+  return null;
+}
 
 let nextKey = 1;
 
@@ -47,6 +96,7 @@ class Connection implements Subscriber {
     private readonly socket: net.Socket,
     private readonly registry: Registry,
     private readonly log: (msg: string) => void,
+    private readonly state: ServerState,
   ) {
     socket.setNoDelay(true);
     this.unlisten = registry.onEvent((evt) => this.sendEvent(evt));
@@ -60,6 +110,15 @@ class Connection implements Subscriber {
 
   sendOut(sessionId: string, data: Buffer): void {
     if (this.closed) return;
+    this.writeFrame(encodeData(FrameType.Out, sessionId, data));
+  }
+
+  private writeFrame(frame: Buffer): void {
+    if (this.closed) return;
+    if (this.socket.destroyed || !this.socket.writable) {
+      this.close();
+      return;
+    }
     // A viewer that stalls (suspended phone, wedged tunnel) must not be able to
     // grow ptyd's memory without bound — but silently skipping output while
     // pretending the connection is still healthy is worse than disconnecting
@@ -74,10 +133,10 @@ class Connection implements Subscriber {
     // fine would never use it.
     if (this.socket.writableLength > MAX_SOCKET_BACKLOG) {
       this.log(`connection ${this.key} is not draining; closing it rather than dropping output`);
-      this.socket.destroy();
+      this.close();
       return;
     }
-    this.socket.write(encodeData(FrameType.Out, sessionId, data));
+    this.socket.write(frame);
   }
 
   sendEvent(evt: Event): void {
@@ -86,31 +145,39 @@ class Connection implements Subscriber {
 
   private send(msg: Message): void {
     if (this.closed) return;
-    this.socket.write(encodeJson(msg));
+    this.writeFrame(encodeJson(msg));
   }
 
   // --- Wire handling --------------------------------------------------------
 
   private onData(chunk: Buffer): void {
+    if (this.closed) return;
     let frames: Frame[];
     try {
       frames = this.decoder.push(chunk);
     } catch (err) {
       if (err instanceof ProtocolError) {
         this.log(`connection ${this.key} protocol error: ${err.message}`);
-        this.socket.destroy();
+        this.close();
         return;
       }
       throw err;
     }
 
     for (const frame of frames) {
+      if (this.closed) break;
       if (frame.type === FrameType.In) {
         const session = this.registry.get(frame.sessionId!);
         if (session) session.write(this, frame.data!);
       } else if (frame.type === FrameType.Json) {
         const msg = frame.json!;
-        if (msg.t === 'req') this.handleRequest(msg);
+        if (!msg || typeof msg !== 'object' || msg.t !== 'req' ||
+          !Number.isSafeInteger(msg.rid) || msg.rid < 0 || typeof msg.op !== 'string') {
+          this.log(`connection ${this.key} sent an invalid request envelope`);
+          this.close();
+          break;
+        }
+        this.handleRequest(msg);
       }
     }
   }
@@ -127,6 +194,11 @@ class Connection implements Subscriber {
 
   private handleRequest(req: Request): void {
     try {
+      const invalid = invalidRequest(req);
+      if (invalid) {
+        this.fail(req.rid, 'bad_request', invalid);
+        return;
+      }
       switch (req.op) {
         case 'list':
           this.ok<'list'>(req.rid, { sessions: this.registry.metas() });
@@ -204,8 +276,11 @@ class Connection implements Subscriber {
           const session = this.registry.require(req.id);
           // Everything below happens in one tick so live output cannot slip in
           // between the snapshot and the start of the live stream.
-          session.attach(this, req.cols, req.rows);
+          // Register ownership first: attach() broadcasts events, and a slow
+          // connection can be closed synchronously during that broadcast.
           this.subscribed.add(req.id);
+          session.attach(this, req.cols, req.rows);
+          if (this.closed) return;
           this.ok<'subscribe'>(req.rid, { session: session.meta });
           if (req.snapshot !== false) {
             const snap = session.snapshot();
@@ -240,10 +315,10 @@ class Connection implements Subscriber {
         case 'stats':
           this.ok<'stats'>(req.rid, {
             pid: process.pid,
-            startedAt: startedAt,
+            startedAt: this.state.startedAt,
             sessions: this.registry.size,
             aliveSessions: this.registry.aliveCount,
-            subscribers: connections.size,
+            subscribers: this.state.connections.size,
             version: VERSION,
           });
           return;
@@ -275,13 +350,10 @@ class Connection implements Subscriber {
       this.registry.get(id)?.detach(this);
     }
     this.subscribed.clear();
-    connections.delete(this);
+    this.state.connections.delete(this);
     this.socket.destroy();
   }
 }
-
-const connections = new Set<Connection>();
-const startedAt = Date.now();
 
 export interface IpcServer {
   close(): Promise<void>;
@@ -294,9 +366,10 @@ export function startIpcServer(
   _cfg: Config,
   log: (msg: string) => void,
 ): Promise<IpcServer> {
+  const state: ServerState = { connections: new Set(), startedAt: Date.now() };
   const server = net.createServer((socket) => {
-    const conn = new Connection(socket, registry, log);
-    connections.add(conn);
+    const conn = new Connection(socket, registry, log, state);
+    state.connections.add(conn);
   });
 
   return new Promise((resolve, reject) => {
@@ -305,10 +378,10 @@ export function startIpcServer(
       server.removeListener('error', reject);
       server.on('error', (err) => log(`ipc server error: ${String(err)}`));
       resolve({
-        connectionCount: () => connections.size,
+        connectionCount: () => state.connections.size,
         close: () =>
           new Promise<void>((done) => {
-            for (const conn of [...connections]) conn.close();
+            for (const conn of [...state.connections]) conn.close();
             server.close(() => done());
           }),
       });

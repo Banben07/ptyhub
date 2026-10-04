@@ -22,6 +22,11 @@ export const MIN_ROWS = 1;
 export const MAX_COLS = 1000;
 export const MAX_ROWS = 1000;
 
+// Bound the headless parser's asynchronous write queue. Pausing PTY reads
+// applies kernel backpressure to the child instead of discarding screen data.
+const PARSER_HIGH_WATER = 256 * 1024;
+const PARSER_LOW_WATER = 64 * 1024;
+
 export function clampCols(n: number): number {
   if (!Number.isFinite(n)) return MIN_COLS;
   return Math.min(MAX_COLS, Math.max(MIN_COLS, Math.floor(n)));
@@ -76,8 +81,8 @@ export interface SessionInit {
 interface Attachment {
   cols: number;
   rows: number;
-  /** Last time this client typed or resized; drives the `active` policy. */
-  activeAt: number;
+  /** Monotonic activity order; wall-clock timestamps can tie or move backwards. */
+  activity: number;
   /** False until the client has declared a window size. */
   sized: boolean;
 }
@@ -86,7 +91,7 @@ export class Session {
   readonly id: string;
   readonly cwd: string;
   readonly argv: string[];
-  readonly createdAt = Date.now();
+  private creationTime = Date.now();
   readonly pid: number;
 
   name: string;
@@ -113,6 +118,9 @@ export class Session {
    * these bytes and the reconnecting client would never see them.
    */
   private readonly pending: Buffer[] = [];
+  private pendingBytes = 0;
+  private outputPaused = false;
+  private activitySeq = 0;
 
   private resizePolicy: ResizePolicy;
   private emit: (evt: Event) => void = () => {};
@@ -163,6 +171,15 @@ export class Session {
     this.emit = emit;
   }
 
+  get createdAt(): number {
+    return this.creationTime;
+  }
+
+  /** A parked shell becomes a user-visible session only when it is claimed. */
+  markCreated(): void {
+    this.creationTime = Date.now();
+  }
+
   get meta(): SessionMeta {
     return {
       id: this.id,
@@ -193,13 +210,34 @@ export class Session {
   // -------------------------------------------------------------------------
 
   private onOutput(chunk: string): void {
+    if (this.disposed) return;
     const buf = Buffer.from(chunk, 'utf8');
     this.ring.write(buf);
     if (this.term) {
       this.pending.push(buf);
+      this.pendingBytes += buf.length;
       // xterm invokes write callbacks in order, so shifting keeps the queue
       // aligned with what the parser has actually consumed.
-      this.term.write(chunk, () => this.pending.shift());
+      this.term.write(chunk, () => {
+        if (this.disposed) return;
+        this.pendingBytes -= this.pending.shift()?.length ?? 0;
+        if (this.outputPaused && this.pendingBytes <= PARSER_LOW_WATER) {
+          this.outputPaused = false;
+          try {
+            this.pty.resume();
+          } catch {
+            // The PTY may have closed while the parser was catching up.
+          }
+        }
+      });
+      if (!this.outputPaused && this.pendingBytes >= PARSER_HIGH_WATER) {
+        try {
+          this.pty.pause();
+          this.outputPaused = true;
+        } catch {
+          // Raced with process exit.
+        }
+      }
     }
     for (const sub of this.attached.keys()) {
       sub.sendOut(this.id, buf);
@@ -222,13 +260,18 @@ export class Session {
   }
 
   write(sub: Subscriber | null, data: Buffer): void {
-    if (!this.alive) return;
+    if (!this.alive || this.disposed || data.length === 0) return;
     if (sub) {
       const att = this.attached.get(sub);
-      if (att) att.activeAt = Date.now();
+      if (att) {
+        att.activity = ++this.activitySeq;
+        if (att.sized) this.reconcileSize();
+      }
     }
     try {
-      this.pty.write(data.toString('utf8'));
+      // An input frame can split a UTF-8 character. Preserve the bytes and let
+      // the terminal's input stream join them, rather than decoding each frame.
+      this.pty.write(data);
     } catch {
       // The process died between the liveness check and the write.
     }
@@ -243,7 +286,7 @@ export class Session {
     this.attached.set(sub, {
       cols: sized ? clampCols(cols!) : this.cols,
       rows: sized ? clampRows(rows!) : this.rows,
-      activeAt: Date.now(),
+      activity: ++this.activitySeq,
       sized,
     });
     if (sized) this.reconcileSize();
@@ -272,7 +315,7 @@ export class Session {
       if (!att) return;
       att.cols = clampCols(cols);
       att.rows = clampRows(rows);
-      att.activeAt = Date.now();
+      att.activity = ++this.activitySeq;
       att.sized = true;
       this.reconcileSize();
       return;
@@ -305,7 +348,7 @@ export class Session {
       cols = Math.min(...sized.map((a) => a.cols));
       rows = Math.min(...sized.map((a) => a.rows));
     } else {
-      const winner = sized.reduce((best, a) => (a.activeAt > best.activeAt ? a : best));
+      const winner = sized.reduce((best, a) => (a.activity > best.activity ? a : best));
       cols = winner.cols;
       rows = winner.rows;
     }
@@ -407,5 +450,7 @@ export class Session {
     this.term?.dispose();
     this.ring.clear();
     this.pending.length = 0;
+    this.pendingBytes = 0;
+    this.outputPaused = false;
   }
 }

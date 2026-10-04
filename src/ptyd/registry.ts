@@ -39,8 +39,12 @@ interface WarmShell {
 export class Registry {
   private readonly sessions = new Map<string, Session>();
   private readonly listeners = new Set<(evt: Event) => void>();
+  private readonly events: Event[] = [];
+  private dispatching = false;
   private procTimer: NodeJS.Timeout | null = null;
   private persistTimer: NodeJS.Timeout | null = null;
+  private poolFill: NodeJS.Immediate | null = null;
+  private running = false;
   /**
    * Shells spawned ahead of demand so "New terminal" can hand one over
    * instead of paying for `spawn` + shell rc startup on every click. Not in
@@ -53,6 +57,8 @@ export class Registry {
   constructor(private readonly cfg: Config) {}
 
   start(): void {
+    if (this.running) return;
+    this.running = true;
     // A previous ptyd's sessions died with it. Start from a clean file rather
     // than resurrecting metadata for shells that no longer exist.
     this.persistNow();
@@ -64,10 +70,13 @@ export class Registry {
   }
 
   stop(): void {
+    this.running = false;
     if (this.procTimer) clearInterval(this.procTimer);
     if (this.persistTimer) clearTimeout(this.persistTimer);
+    if (this.poolFill) clearImmediate(this.poolFill);
     this.procTimer = null;
     this.persistTimer = null;
+    this.poolFill = null;
     for (const session of this.sessions.values()) session.dispose();
     this.sessions.clear();
     for (const warm of this.warmPool.splice(0)) warm.session.dispose();
@@ -84,8 +93,27 @@ export class Registry {
   }
 
   private broadcast(evt: Event): void {
-    for (const listener of this.listeners) listener(evt);
-    if (evt.ev !== 'proc' && evt.ev !== 'ready') this.persistSoon();
+    this.events.push(evt);
+    if (this.dispatching) return;
+    this.dispatching = true;
+    try {
+      // Closing a slow connection can detach a viewer and emit another size
+      // event. Finish the current fanout before delivering that newer event,
+      // so every client observes the same order and ends on the current state.
+      while (this.events.length > 0) {
+        const next = this.events.shift()!;
+        for (const listener of [...this.listeners]) {
+          try {
+            listener(next);
+          } catch (err) {
+            process.stderr.write(`[ptyd] event listener failed: ${String(err)}\n`);
+          }
+        }
+        if (next.ev !== 'proc' && next.ev !== 'ready') this.persistSoon();
+      }
+    } finally {
+      this.dispatching = false;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -129,9 +157,12 @@ export class Registry {
     // plain environment, so only a request asking for exactly that can claim
     // one — anything more specific (a custom command, cwd or env) still pays
     // for a fresh spawn.
-    const poolable =
-      this.cfg.warmPoolEnabled && !opts.argv && !opts.cwd && !opts.env && this.warmPool.length > 0;
-    if (poolable) return this.claimWarm(opts);
+    const poolable = this.cfg.warmPoolEnabled && !opts.argv && !opts.cwd && !opts.env;
+    if (poolable) {
+      this.discardUnusableWarm();
+      if (this.warmPool.length > 0) return this.claimWarm(opts);
+      this.fillPool();
+    }
 
     const id = this.freshId();
     const cwd = this.resolveCwd(opts.cwd);
@@ -172,7 +203,13 @@ export class Registry {
 
   private claimWarm(opts: CreateOptions): Session {
     const { session } = this.warmPool.shift()!;
+    session.markCreated();
     if (opts.name?.trim()) session.rename(opts.name.trim());
+    session.declareSize(
+      null,
+      clampCols(opts.cols ?? this.cfg.defaultCols),
+      clampRows(opts.rows ?? this.cfg.defaultRows),
+    );
     session.setEmitter((evt) => this.broadcast(evt));
     this.sessions.set(session.id, session);
     session.refreshProc();
@@ -228,23 +265,41 @@ export class Registry {
   }
 
   private fillPool(): void {
-    if (!this.cfg.warmPoolEnabled) return;
-    while (this.warmPool.length < this.cfg.warmPoolSize) {
-      this.warmPool.push({ session: this.spawnWarm(), bornAt: Date.now() });
+    if (!this.running || !this.cfg.warmPoolEnabled || this.poolFill) return;
+    const target = Number.isFinite(this.cfg.warmPoolSize)
+      ? Math.min(32, Math.max(0, Math.floor(this.cfg.warmPoolSize)))
+      : 0;
+    if (this.warmPool.length >= target) return;
+    // Spawn at most one shell per event-loop turn, after the request's reply
+    // has been queued. A refill failure must not fail an already-created session.
+    this.poolFill = setImmediate(() => {
+      this.poolFill = null;
+      if (!this.running) return;
+      try {
+        this.warmPool.push({ session: this.spawnWarm(), bornAt: Date.now() });
+      } catch (err) {
+        process.stderr.write(`[ptyd] could not prewarm shell: ${String(err)}\n`);
+        // The next regular sweep retries, avoiding a tight failure loop.
+        return;
+      }
+      this.fillPool();
+    });
+    this.poolFill.unref?.();
+  }
+
+  /** Never hand out an exited shell, or one with an excessively old environment. */
+  private discardUnusableWarm(): void {
+    const cutoff = Date.now() - this.cfg.warmPoolMaxIdleMs;
+    for (let i = this.warmPool.length - 1; i >= 0; i--) {
+      const warm = this.warmPool[i]!;
+      if (warm.session.alive && warm.bornAt >= cutoff) continue;
+      this.warmPool.splice(i, 1);
+      warm.session.dispose();
     }
   }
 
-  /** Respawn any pooled shell that has sat unclaimed long enough to risk a stale environment. */
   private sweepPool(): void {
-    if (this.warmPool.length === 0) return;
-    const cutoff = Date.now() - this.cfg.warmPoolMaxIdleMs;
-    const stale = this.warmPool.filter((w) => w.bornAt < cutoff);
-    if (stale.length === 0) return;
-    for (const warm of stale) {
-      const idx = this.warmPool.indexOf(warm);
-      if (idx !== -1) this.warmPool.splice(idx, 1);
-      warm.session.dispose();
-    }
+    this.discardUnusableWarm();
     this.fillPool();
   }
 

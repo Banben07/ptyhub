@@ -217,12 +217,19 @@ Common `config.json` settings:
   "autoCreateFirstSession": true,
   "resizePolicy": "active", // "active" follows the device in use, "min" takes the smallest
   "reviveScreen": true,     // exact screen restore; off falls back to raw replay
+  "warmPoolEnabled": true,  // pre-spawn default shells for new terminals
+  "warmPoolSize": 4,        // bounded to 0–32; refilled in the background
+  "warmPoolMaxIdleMs": 300000,
   "trustedNetwork": false,  // true disables auth entirely
   "allowedOrigins": []      // extra origins for a reverse proxy
 }
 ```
 
 Child processes inherit `ptyd`'s environment plus `TERM=xterm-256color` and `COLORTERM=truecolor`, and nothing else.
+
+The warm pool discards exited and expired shells before handing one over, applies the requested terminal size, and records creation time when the shell is claimed. Custom commands, directories and environments still spawn their own shells. A failed background refill does not fail a session that has already been created.
+
+When the headless screen parser falls behind, `ptyd` pauses PTY reads at roughly 256 KiB of pending output and resumes below 64 KiB. This applies backpressure to the child rather than dropping its output. A viewer whose socket stops draining is disconnected; reconnecting restores its screen from a snapshot. Control messages and terminal output share that socket backlog limit. These daemon protections apply to both Web and CLI clients.
 
 ---
 

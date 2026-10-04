@@ -217,12 +217,19 @@ systemctl --user restart ptyhub-ptyd    # 会杀掉全部会话，很少需要
   "autoCreateFirstSession": true,
   "resizePolicy": "active", // "active" 跟随正在用的设备，"min" 取最小值
   "reviveScreen": true,     // 精确重建画面；关掉则退回原始字节重放
+  "warmPoolEnabled": true,  // 提前启动默认 shell，供新终端使用
+  "warmPoolSize": 4,        // 限制为 0–32，在后台补充
+  "warmPoolMaxIdleMs": 300000,
   "trustedNetwork": false,  // true 完全关闭认证
   "allowedOrigins": []      // 反向代理的额外来源
 }
 ```
 
 子进程拿到的环境是 `ptyd` 自己的环境加上 `TERM=xterm-256color` 和 `COLORTERM=truecolor`，不多不少。
+
+预热池交出 shell 前会丢弃已退出或过期的项，并应用新终端请求的尺寸；创建时间以认领时为准。指定命令、目录或环境时仍会单独启动 shell。后台补充失败不会让已经创建成功的会话报错。
+
+服务端的屏幕解析跟不上输出时，`ptyd` 会在待处理数据达到约 256 KiB 时暂缓读取伪终端，降到 64 KiB 后继续读取，让子进程的输出速度随处理能力调整。输出不会因此被主动丢弃。客户端套接字持续积压时会被断开，重新连接后通过快照恢复画面；控制消息和终端输出使用同一积压限制。这些保护同时适用于 Web 和命令行客户端。
 
 ---
 

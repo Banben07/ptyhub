@@ -59,6 +59,7 @@ export function httpStatusForPtydError(err: PtydError): number {
     case 'no_such_session':
       return 404;
     case 'bad_name':
+    case 'bad_request':
     case 'bad_op':
       return 400;
     case 'session_locked':
